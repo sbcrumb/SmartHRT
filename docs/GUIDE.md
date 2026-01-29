@@ -109,14 +109,79 @@ These sensors have `device_class: timestamp` and can be used as automation trigg
 **Example automation trigger:**
 
 ```yaml
-automation:
-  trigger:
-    - platform: time
-      at: sensor.smarthrt_chambre_heure_de_relance
-  action:
-    - service: switch.turn_on
-      target:
-        entity_id: switch.heating
+alias: "Chauffage : Bascule matin <> soir (Avec Week-end)"
+description: Gère les cycles SmartHRT avec un horaire spécifique pour le week-end (10h-21h)
+triggers:
+  - at: sensor.smarthrt_heure_de_relance
+    id: start_heating
+    trigger: time
+  - at: sensor.smarthrt_heure_coupure_timestamp
+    id: fin_cycle
+    trigger: time
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: start_heating
+        sequence:
+          - action: climate.turn_on
+            target:
+              entity_id: climate.<YOUR_ENTITY>
+            data: {}
+      - conditions:
+          - condition: trigger
+            id: fin_cycle
+        sequence:
+          - if:
+              - condition: time
+                before: "12:00:00"
+            then:
+              - target:
+                  entity_id: time.smarthrt_heure_cible
+                data:
+                  time: "{{ soir_cible }}"
+                action: time.set_value
+              - target:
+                  entity_id: time.smarthrt_heure_coupure_chauffage
+                data:
+                  time: "{{ soir_fin }}"
+                action: time.set_value
+            else:
+              - if:
+                  - condition: template
+                    value_template: "{{ (now() + timedelta(days=1)).weekday() in [5, 6] }}"
+                then:
+                  - target:
+                      entity_id: time.smarthrt_heure_cible
+                    data:
+                      time: "{{ matin_cible_we }}"
+                    action: time.set_value
+                  - target:
+                      entity_id: time.smarthrt_heure_coupure_chauffage
+                    data:
+                      time: "{{ soir_fin }}"
+                    action: time.set_value
+                else:
+                  - target:
+                      entity_id: time.smarthrt_heure_cible
+                    data:
+                      time: "{{ matin_cible }}"
+                    action: time.set_value
+                  - target:
+                      entity_id: time.smarthrt_heure_coupure_chauffage
+                    data:
+                      time: "{{ matin_fin }}"
+                    action: time.set_value
+          - action: climate.turn_off
+            target:
+              entity_id: climate.climate.<YOUR_ENTITY>
+            data: {}
+variables:
+  matin_cible: "07:00:00"
+  matin_cible_we: "10:00:00"
+  matin_fin: "08:00:00"
+  soir_cible: "17:30:00"
+  soir_fin: "21:00:00"
 ```
 
 ### Time Entities (User-configurable)

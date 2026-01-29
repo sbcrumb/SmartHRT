@@ -74,6 +74,15 @@ Required parameters are configured via the Home Assistant interface:
 
 SmartHRT automatically creates **Sensors**, **Numbers**, **Switches** and **Time** entities. See [User Guide](docs/GUIDE.md#available-sensors--controls) for complete list and descriptions.
 
+## Requirements
+
+- For dashboard interface:
+  - [HACS](https://www.home-assistant.io/blog/2024/08/21/hacs-the-best-way-to-share-community-made-projects/#how-to-install)
+  - [Bubble-Card](https://github.com/Clooos/Bubble-Card)
+  - [Mini-Graph-Card](https://github.com/kalkih/mini-graph-card)
+  - [Apexcharts-Card](https://github.com/RomRider/apexcharts-card)
+  - [Lovelace-Card-Mod](https://github.com/thomasloven/lovelace-card-mod)
+
 ## ❓ FAQ & Support
 
 → **[Troubleshooting and FAQ](docs/GUIDE.md#faq)**
