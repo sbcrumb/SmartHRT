@@ -9,28 +9,28 @@ context: |
   mais pas les triggers temporels ni les tâches périodiques associées à chaque état.
 
   Problèmes identifiés :
-  
+
   **État DETECTING_LAG (État 2) :**
   - La surveillance de température était active (via _periodic_update) ✅
   - Pas de trigger spécifique à reprogrammer ✅
-  
+
   **État MONITORING (État 3) :**
   - Les mises à jour périodiques de recovery_start_hour étaient perdues ❌
   - Le trigger recovery_update_hour n'était pas reprogrammé ❌
   - Le trigger recovery_start_hour n'était pas reprogrammé ❌
   - Impact : L'instance restait en mode "veille" sans mettre à jour les calculs
-  
+
   **État RECOVERY (État 4) :**
   - État transitoire très court (quelques secondes) ❌
   - Si HA redémarre pendant ces secondes, l'instance reste bloquée en RECOVERY
   - Pas de mécanisme pour passer automatiquement à HEATING_PROCESS
-  
+
   **État HEATING_PROCESS (État 5) :**
   - La surveillance de TSP était active (via _check_temperature_thresholds) ✅
   - Mais si target_hour était dépassée pendant le redémarrage, on_recovery_end() 
     n'était jamais appelé ❌
   - Impact : RPth n'était pas calculé si le réveil avait lieu pendant le redémarrage
-  
+
   **État HEATING_ON (État 1) :**
   - Aucun trigger spécifique à restaurer ✅
 

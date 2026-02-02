@@ -355,22 +355,35 @@ class SmartHRTCoordinator:
 
         elif current_state == SmartHRTState.MONITORING:
             # État 3: Surveillance nocturne avec calculs récurrents
-            # Reprogrammer les mises à jour périodiques de recovery_start_hour
-            if self.data.recovery_calc_mode and self.data.recovery_update_hour:
-                if self.data.recovery_update_hour > now:
-                    self._schedule_recovery_update(self.data.recovery_update_hour)
+            _LOGGER.debug(
+                "%s État MONITORING restauré - recovery_calc_mode=%s",
+                self._log_prefix(),
+                self.data.recovery_calc_mode,
+            )
+
+            # Si recovery_calc_mode est actif, recalculer immédiatement
+            if self.data.recovery_calc_mode:
+                # Calculer RCth dynamique et recovery_time
+                await self._hass.async_add_executor_job(self.calculate_rcth_fast)
+                await self._hass.async_add_executor_job(self.calculate_recovery_time)
+                _LOGGER.debug(
+                    "%s Recalcul initial après restauration - RCth_fast=%.2f",
+                    self._log_prefix(),
+                    self.data.rcth_fast,
+                )
+
+                # Programmer le prochain trigger de mise à jour
+                update_time = await self._hass.async_add_executor_job(
+                    self.calculate_recovery_update_time
+                )
+                if update_time:
+                    self.data.recovery_update_hour = update_time
+                    self._schedule_recovery_update(update_time)
                     _LOGGER.debug(
-                        "%s Trigger recovery_update_hour reprogrammé: %s",
+                        "%s Trigger recovery_update_hour programmé: %s",
                         self._log_prefix(),
-                        self.data.recovery_update_hour,
+                        update_time,
                     )
-                else:
-                    # Le trigger est dépassé, recalculer immédiatement
-                    _LOGGER.debug(
-                        "%s Trigger recovery_update_hour dépassé, recalcul immédiat",
-                        self._log_prefix(),
-                    )
-                    await self._async_on_recovery_update_hour()
 
             # Reprogrammer le trigger de démarrage de relance si nécessaire
             if self.data.recovery_start_hour:
