@@ -47,6 +47,24 @@ decision: |
   de `async_setup()` qui analyse l'état courant et reprogramme tous les triggers
   et tâches périodiques nécessaires.
 
+  **AMÉLIORATION MAJEURE - Vérification de cohérence horaire :**
+  Avant de restaurer les triggers, la méthode vérifie que l'état persisté est
+  cohérent avec l'heure actuelle via `_determine_expected_state_for_time()`.
+  Si l'état n'est pas cohérent (ex: état MONITORING persisté mais il est 10h
+  du matin), l'état est automatiquement corrigé via `_transition_to_expected_state()`.
+
+  **Méthode _determine_expected_state_for_time() :**
+  Détermine l'état attendu basé sur l'heure actuelle par rapport aux heures
+  configurées (target_hour, recoverycalc_hour, recovery_start_hour):
+  - target_hour → recoverycalc_hour : HEATING_ON (jour)
+  - recoverycalc_hour → recovery_start_hour : MONITORING (nuit)
+  - recovery_start_hour → target_hour : HEATING_PROCESS (relance)
+
+  **Méthode _transition_to_expected_state() :**
+  Force la transition vers l'état attendu en configurant correctement tous les
+  modes (recovery_calc_mode, rp_calc_mode, temp_lag_detection_active) et en
+  initialisant les valeurs de référence si nécessaires.
+
   **Implémentation par état :**
 
   1. **DETECTING_LAG** : Rien de spécial, la surveillance est déjà active
@@ -72,10 +90,10 @@ decision: |
   6. **État inconnu** : Log warning et réinitialisation à HEATING_ON
 
   **Logs ajoutés :**
-  - INFO au début : "Restauration après redémarrage - État: {state}"
+  - INFO au début : "Restauration après redémarrage - État persisté: {state}, État attendu (heure): {expected}"
+  - WARNING si incohérence : "État incohérent détecté - Correction: {old} → {new}"
   - DEBUG pour chaque trigger reprogrammé
   - INFO pour les actions correctives (trigger dépassé, transition forcée)
-  - WARNING pour les états inconnus
 
 consequences:
   positive:
@@ -146,18 +164,32 @@ test_scenarios:
     expected: "on_recovery_end() appelé immédiatement"
   - scenario: "Redémarrage avec état corrompu"
     expected: "Warning logué et réinitialisation à HEATING_ON"
+  - scenario: "État MONITORING persisté mais il est 10h du matin"
+    expected: "Correction automatique vers HEATING_ON, warning logué"
+  - scenario: "État HEATING_ON persisté mais il est 2h du matin"
+    expected: "Correction automatique vers MONITORING, calculs RCth démarrés"
+  - scenario: "État HEATING_ON persisté mais il est 5h30 (après recovery_start)"
+    expected: "Correction automatique vers HEATING_PROCESS, rp_calc_mode activé"
 
 examples: |
-  **Logs lors d'une restauration en état MONITORING :**
+  **Logs lors d'une restauration en état MONITORING (cohérent) :**
   ```
-  [Salon#a1b2c3d4] Restauration après redémarrage - État: monitoring
+  [Salon#a1b2c3d4] Restauration après redémarrage - État persisté: monitoring, État attendu (heure): monitoring
   [Salon#a1b2c3d4] Trigger recovery_update_hour reprogrammé: 2026-02-03 02:30:00
   [Salon#a1b2c3d4] Trigger recovery_start reprogrammé: 2026-02-03 04:15:00
   ```
 
+  **Logs lors d'une restauration avec état incohérent :**
+  ```
+  [Chambre#e5f6g7h8] Restauration après redémarrage - État persisté: monitoring, État attendu (heure): heating_on
+  [Chambre#e5f6g7h8] État incohérent détecté - Correction: monitoring → heating_on
+  [Chambre#e5f6g7h8] Transition forcée vers l'état heating_on
+  [Chambre#e5f6g7h8] État HEATING_ON initialisé - Mode journée
+  ```
+
   **Logs lors d'une restauration avec trigger dépassé :**
   ```
-  [Chambre#e5f6g7h8] Restauration après redémarrage - État: monitoring
+  [Chambre#e5f6g7h8] Restauration après redémarrage - État persisté: monitoring, État attendu (heure): monitoring
   [Chambre#e5f6g7h8] Trigger recovery_update_hour dépassé, recalcul immédiat
   [Chambre#e5f6g7h8] Recovery time: 2026-02-03 04:45:00 (1.50h avant target)
   [Chambre#e5f6g7h8] Prochaine mise à jour programmée: 2026-02-03 03:30:00
@@ -165,8 +197,7 @@ examples: |
 
   **Logs lors d'une restauration en état RECOVERY (rare) :**
   ```
-  [Bureau#f7g8h9i0] Restauration après redémarrage - État: recovery
+  [Bureau#f7g8h9i0] Restauration après redémarrage - État persisté: recovery, État attendu (heure): heating_process
   [Bureau#f7g8h9i0] État RECOVERY restauré pendant redémarrage - Passage à HEATING_PROCESS
   [Bureau#f7g8h9i0] Données apprises et état sauvegardés en stockage
-  [Bureau#f7g8h9i0] État HEATING_PROCESS restauré - Surveillance TSP active (rp_calc_mode=True)
   ```
