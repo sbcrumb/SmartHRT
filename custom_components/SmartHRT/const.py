@@ -95,6 +95,9 @@ PERSISTED_FIELDS: list[tuple[str, str, object, str]] = [
     ("time_recovery_calc", "time_recovery_calc", None, "datetime"),
     ("temp_recovery_calc", "temp_recovery_calc", 17.0, "float"),
     ("text_recovery_calc", "text_recovery_calc", 0.0, "float"),
+    # Prévisions météo (ADR-020)
+    ("temperature_forecast_avg", "temperature_forecast_avg", 0.0, "float"),
+    ("wind_speed_forecast_avg", "wind_speed_forecast_avg", 0.0, "float"),
 ]
 
 # Legacy storage keys (kept for backward compatibility imports)
