@@ -179,6 +179,14 @@ class SmartHRTCoordinator:
         # ADR-002: Entité météo sélectionnée explicitement par l'utilisateur
         self._weather_entity_id = entry.data.get(CONF_WEATHER_ENTITY)
 
+    def _log_prefix(self) -> str:
+        """Retourne un préfixe pour les logs incluant le nom et entry_id de l'instance.
+
+        Permet de dissocier les entrées de log quand plusieurs instances SmartHRT
+        sont configurées, en incluant le nom et l'identifiant unique.
+        """
+        return f"[{self.data.name}#{self._entry.entry_id[:8]}]"
+
     @staticmethod
     def _parse_time(time_str: str) -> dt_time:
         """Parse une chaîne de temps en objet time"""
@@ -195,8 +203,8 @@ class SmartHRTCoordinator:
     async def async_setup(self) -> None:
         """Configuration asynchrone du coordinateur"""
         _LOGGER.debug(
-            "Configuration SmartHRT '%s' - TSP=%.1f°C, target_hour=%s, recoverycalc_hour=%s",
-            self.data.name,
+            "%s Configuration - TSP=%.1f°C, target_hour=%s, recoverycalc_hour=%s",
+            self._log_prefix(),
             self.data.tsp,
             self.data.target_hour,
             self.data.recoverycalc_hour,
@@ -243,14 +251,18 @@ class SmartHRTCoordinator:
         """
         stored_data = await self._store.async_load()
         if stored_data:
-            _LOGGER.info("Restoring learned data and state from storage")
+            _LOGGER.info(
+                "%s Restoration des données apprises depuis le stockage",
+                self._log_prefix(),
+            )
 
             for storage_key, attr_name, default_value, field_type in PERSISTED_FIELDS:
                 stored_value = stored_data.get(storage_key)
 
                 if stored_value is None:
-                    # Use default value if not in storage
-                    setattr(self.data, attr_name, default_value)
+                    # Use default value if not in storage (None means keep current value)
+                    if default_value is not None:
+                        setattr(self.data, attr_name, default_value)
                 elif field_type == "datetime":
                     # Parse ISO format datetime strings
                     try:
@@ -259,19 +271,30 @@ class SmartHRTCoordinator:
                         )
                     except (ValueError, TypeError):
                         setattr(self.data, attr_name, default_value)
+                elif field_type == "time":
+                    # Parse time strings (HH:MM:SS or HH:MM)
+                    try:
+                        setattr(self.data, attr_name, self._parse_time(stored_value))
+                    except (ValueError, TypeError):
+                        # Keep current value if parsing fails
+                        pass
                 else:
                     # Direct assignment for float, bool, str
                     setattr(self.data, attr_name, stored_value)
 
             _LOGGER.debug(
-                "Restored: state=%s, rcth=%.2f, rpth=%.2f, recovery_calc_mode=%s",
+                "%s Données restaurées: state=%s, rcth=%.2f, rpth=%.2f, recovery_calc_mode=%s",
+                self._log_prefix(),
                 self.data.current_state,
                 self.data.rcth,
                 self.data.rpth,
                 self.data.recovery_calc_mode,
             )
         else:
-            _LOGGER.debug("No stored learned data found, using defaults")
+            _LOGGER.debug(
+                "%s Aucune donnée apprise trouvée, utilisation des défauts",
+                self._log_prefix(),
+            )
 
     async def _save_learned_data(self) -> None:
         """Save learned coefficients and state to persistent storage.
@@ -290,12 +313,17 @@ class SmartHRTCoordinator:
             if field_type == "datetime":
                 # Serialize datetime to ISO format string
                 data_to_store[storage_key] = value.isoformat() if value else None
+            elif field_type == "time":
+                # Serialize time to HH:MM:SS string
+                data_to_store[storage_key] = value.isoformat() if value else None
             else:
                 # Direct storage for float, bool, str
                 data_to_store[storage_key] = value
 
         await self._store.async_save(data_to_store)
-        _LOGGER.debug("Saved learned data and state to storage")
+        _LOGGER.debug(
+            "%s Données apprises et état sauvegardés en stockage", self._log_prefix()
+        )
 
     def _setup_listeners(self) -> None:
         """Configure les listeners pour les capteurs"""
@@ -465,7 +493,7 @@ class SmartHRTCoordinator:
         """Appelé à l'heure de coupure du chauffage (recoverycalc_hour)
         Équivalent de l'automation 'heatingstopTIME' du YAML
         """
-        _LOGGER.info("SmartHRT: Heure de coupure chauffage atteinte")
+        _LOGGER.info("%s Heure de coupure chauffage atteinte", self._log_prefix())
 
         if not self.data.smartheating_mode:
             self._reschedule_recoverycalc_hour()
@@ -485,7 +513,7 @@ class SmartHRTCoordinator:
             self.data.rcth_hw = 50.0
             self.data.rpth_lw = 50.0
             self.data.rpth_hw = 50.0
-            _LOGGER.info("SmartHRT: Initialisation des constantes à 50")
+            _LOGGER.info("%s Initialisation des constantes à 50", self._log_prefix())
 
         # Enregistre les valeurs courantes
         self.data.time_recovery_calc = dt_util.now()
@@ -495,7 +523,7 @@ class SmartHRTCoordinator:
         # Transition vers DETECTING_LAG (État 2)
         self.data.current_state = SmartHRTState.DETECTING_LAG
         self.data.temp_lag_detection_active = True
-        _LOGGER.debug("SmartHRT: Transition vers état DETECTING_LAG")
+        _LOGGER.debug("%s Transition vers état DETECTING_LAG", self._log_prefix())
 
         # Sauvegarder l'heure de relance avant calcul
         prev_recovery_start = self.data.recovery_start_hour
@@ -533,9 +561,21 @@ class SmartHRTCoordinator:
         """Appelé à l'heure calculée de démarrage de la relance (recoverystart_hour)
         Équivalent de l'automation 'boostTIME' du YAML
         """
-        _LOGGER.info("SmartHRT: Heure de démarrage relance atteinte")
+        _LOGGER.info("%s Heure de démarrage relance atteinte", self._log_prefix())
 
         if not self.data.smartheating_mode:
+            return
+
+        # Éviter de déclencher si on est déjà en RECOVERY ou HEATING_PROCESS
+        if self.data.current_state in (
+            SmartHRTState.RECOVERY,
+            SmartHRTState.HEATING_PROCESS,
+        ):
+            _LOGGER.debug(
+                "%s Relance ignorée, déjà en état %s",
+                self._log_prefix(),
+                self.data.current_state,
+            )
             return
 
         self.on_recovery_start()
@@ -545,7 +585,7 @@ class SmartHRTCoordinator:
         """Appelé à l'heure cible (target_hour / réveil)
         Équivalent de l'automation 'recoveryendTIME' du YAML
         """
-        _LOGGER.info("SmartHRT: Heure cible atteinte")
+        _LOGGER.info("%s Heure cible atteinte", self._log_prefix())
 
         if self.data.smartheating_mode and self.data.rp_calc_mode:
             self.on_recovery_end()
@@ -560,7 +600,7 @@ class SmartHRTCoordinator:
         if not self.data.smartheating_mode:
             return
 
-        _LOGGER.debug("SmartHRT: Mise à jour du calcul de relance")
+        _LOGGER.debug("%s Mise à jour du calcul de relance", self._log_prefix())
         # Déléguer les calculs lourds à une tâche asynchrone
         self._hass.async_create_task(self._async_on_recovery_update_hour())
 
@@ -592,7 +632,11 @@ class SmartHRTCoordinator:
         if update_time:
             self.data.recovery_update_hour = update_time
             self._schedule_recovery_update(update_time)
-            _LOGGER.debug("SmartHRT: Prochaine mise à jour programmée: %s", update_time)
+            _LOGGER.debug(
+                "%s Prochaine mise à jour programmée: %s",
+                self._log_prefix(),
+                update_time,
+            )
 
         self._notify_listeners()
 
@@ -636,12 +680,14 @@ class SmartHRTCoordinator:
         if self._unsub_recovery_start:
             self._unsub_recovery_start()
             _LOGGER.debug(
-                "SmartHRT: Trigger reprogrammé: annulation du précédent, nouveau à %s",
+                "%s Trigger reprogrammé: annulation du précédent, nouveau à %s",
+                self._log_prefix(),
                 trigger_time,
             )
         else:
             _LOGGER.debug(
-                "SmartHRT: Nouveau trigger recovery_start programmé: %s",
+                "%s Nouveau trigger recovery_start programmé: %s",
+                self._log_prefix(),
                 trigger_time,
             )
 
@@ -657,7 +703,11 @@ class SmartHRTCoordinator:
             self._unsub_recovery_update()
             self._unsub_recovery_update = None
 
-        _LOGGER.debug("SmartHRT: Programmation prochaine mise à jour: %s", trigger_time)
+        _LOGGER.debug(
+            "%s Programmation prochaine mise à jour: %s",
+            self._log_prefix(),
+            trigger_time,
+        )
         self._unsub_recovery_update = async_track_point_in_time(
             self._hass, self._on_recovery_update_hour, trigger_time
         )
@@ -1135,7 +1185,7 @@ class SmartHRTCoordinator:
         self.data.current_state = SmartHRTState.MONITORING
         self.data.recovery_calc_mode = True
         self.data.temp_lag_detection_active = False
-        _LOGGER.debug("SmartHRT: Transition vers état MONITORING")
+        _LOGGER.debug("%s Transition vers état MONITORING", self._log_prefix())
 
         self.calculate_recovery_time()
 
@@ -1146,7 +1196,8 @@ class SmartHRTCoordinator:
             self._schedule_recovery_update(update_time)
 
         _LOGGER.info(
-            "SmartHRT: Baisse de température détectée après %.0fs de lag",
+            "%s Baisse de température détectée après %.0fs de lag",
+            self._log_prefix(),
             self.data.stop_lag_duration,
         )
 
@@ -1231,7 +1282,8 @@ class SmartHRTCoordinator:
         expected_state = self._determine_expected_state_for_time(now)
 
         _LOGGER.info(
-            "SmartHRT: Restauration après redémarrage - État persisté: %s, État attendu: %s",
+            "%s Restauration après redémarrage - État persisté: %s, État attendu: %s",
+            self._log_prefix(),
             persisted_state,
             expected_state,
         )
@@ -1251,7 +1303,8 @@ class SmartHRTCoordinator:
 
         if not state_is_coherent:
             _LOGGER.warning(
-                "SmartHRT: État incohérent détecté - Correction: %s → %s",
+                "%s État incohérent détecté - Correction: %s → %s",
+                self._log_prefix(),
                 persisted_state,
                 expected_state,
             )
@@ -1269,7 +1322,8 @@ class SmartHRTCoordinator:
                 else:
                     # L'heure de relance est dépassée, démarrer immédiatement
                     _LOGGER.info(
-                        "SmartHRT: Heure de relance dépassée, démarrage immédiat"
+                        "%s Heure de relance dépassée, démarrage immédiat",
+                        self._log_prefix(),
                     )
                     self.on_recovery_start()
 
@@ -1303,7 +1357,8 @@ class SmartHRTCoordinator:
             now: L'heure actuelle
         """
         _LOGGER.info(
-            "SmartHRT: Transition forcée vers l'état %s",
+            "%s Transition forcée vers l'état %s",
+            self._log_prefix(),
             expected_state,
         )
 
@@ -1380,7 +1435,9 @@ class SmartHRTCoordinator:
             try:
                 self._schedule_recovery_start(self.data.recovery_start_hour)
             except Exception as e:
-                _LOGGER.warning("SmartHRT: Erreur reprogrammation trigger: %s", e)
+                _LOGGER.warning(
+                    "%s Erreur reprogrammation trigger: %s", self._log_prefix(), e
+                )
         self._notify_listeners()
 
     def on_recovery_start(self) -> None:
@@ -1391,7 +1448,7 @@ class SmartHRTCoordinator:
         """
         # Transition vers RECOVERY (État 4)
         self.data.current_state = SmartHRTState.RECOVERY
-        _LOGGER.debug("SmartHRT: Transition vers état RECOVERY")
+        _LOGGER.debug("%s Transition vers état RECOVERY", self._log_prefix())
 
         self.data.time_recovery_start = dt_util.now()
         self.data.temp_recovery_start = self.data.interior_temp or 17.0
@@ -1405,10 +1462,11 @@ class SmartHRTCoordinator:
 
         # Transition vers HEATING_PROCESS (État 5) - chauffage en cours
         self.data.current_state = SmartHRTState.HEATING_PROCESS
-        _LOGGER.debug("SmartHRT: Transition vers état HEATING_PROCESS")
+        _LOGGER.debug("%s Transition vers état HEATING_PROCESS", self._log_prefix())
 
         _LOGGER.info(
-            "SmartHRT: Début de relance - Tint=%.1f°C, RCth calculé=%.2f",
+            "%s Début de relance - Tint=%.1f°C, RCth calculé=%.2f",
+            self._log_prefix(),
             self.data.temp_recovery_start,
             self.data.rcth_calculated,
         )
@@ -1437,10 +1495,13 @@ class SmartHRTCoordinator:
 
         # Transition vers HEATING_ON (État 1) - cycle terminé
         self.data.current_state = SmartHRTState.HEATING_ON
-        _LOGGER.debug("SmartHRT: Transition vers état HEATING_ON - Cycle terminé")
+        _LOGGER.debug(
+            "%s Transition vers état HEATING_ON - Cycle terminé", self._log_prefix()
+        )
 
         _LOGGER.info(
-            "SmartHRT: Fin de relance - Tint=%.1f°C, RPth calculé=%.2f",
+            "%s Fin de relance - Tint=%.1f°C, RPth calculé=%.2f",
+            self._log_prefix(),
             self.data.temp_recovery_end,
             self.data.rpth_calculated,
         )
@@ -1469,7 +1530,9 @@ class SmartHRTCoordinator:
             try:
                 self._schedule_recovery_start(self.data.recovery_start_hour)
             except Exception as e:
-                _LOGGER.warning("SmartHRT: Erreur reprogrammation trigger: %s", e)
+                _LOGGER.warning(
+                    "%s Erreur reprogrammation trigger: %s", self._log_prefix(), e
+                )
         self._notify_listeners()
 
     def set_target_hour(self, value: dt_time) -> None:
@@ -1506,7 +1569,9 @@ class SmartHRTCoordinator:
             try:
                 self._schedule_recovery_start(self.data.recovery_start_hour)
             except Exception as e:
-                _LOGGER.warning("SmartHRT: Erreur reprogrammation trigger: %s", e)
+                _LOGGER.warning(
+                    "%s Erreur reprogrammation trigger: %s", self._log_prefix(), e
+                )
         self._notify_listeners()
 
     def set_rpth(self, value: float) -> None:
@@ -1520,7 +1585,9 @@ class SmartHRTCoordinator:
             try:
                 self._schedule_recovery_start(self.data.recovery_start_hour)
             except Exception as e:
-                _LOGGER.warning("SmartHRT: Erreur reprogrammation trigger: %s", e)
+                _LOGGER.warning(
+                    "%s Erreur reprogrammation trigger: %s", self._log_prefix(), e
+                )
         self._notify_listeners()
 
     def set_relaxation_factor(self, value: float) -> None:
@@ -1538,7 +1605,9 @@ class SmartHRTCoordinator:
             try:
                 self._schedule_recovery_start(self.data.recovery_start_hour)
             except Exception as e:
-                _LOGGER.warning("SmartHRT: Erreur reprogrammation trigger: %s", e)
+                _LOGGER.warning(
+                    "%s Erreur reprogrammation trigger: %s", self._log_prefix(), e
+                )
         self._notify_listeners()
 
     def set_rcth_hw(self, value: float) -> None:
@@ -1552,7 +1621,9 @@ class SmartHRTCoordinator:
             try:
                 self._schedule_recovery_start(self.data.recovery_start_hour)
             except Exception as e:
-                _LOGGER.warning("SmartHRT: Erreur reprogrammation trigger: %s", e)
+                _LOGGER.warning(
+                    "%s Erreur reprogrammation trigger: %s", self._log_prefix(), e
+                )
         self._notify_listeners()
 
     def set_rpth_lw(self, value: float) -> None:
@@ -1566,7 +1637,9 @@ class SmartHRTCoordinator:
             try:
                 self._schedule_recovery_start(self.data.recovery_start_hour)
             except Exception as e:
-                _LOGGER.warning("SmartHRT: Erreur reprogrammation trigger: %s", e)
+                _LOGGER.warning(
+                    "%s Erreur reprogrammation trigger: %s", self._log_prefix(), e
+                )
         self._notify_listeners()
 
     def set_rpth_hw(self, value: float) -> None:
@@ -1580,7 +1653,9 @@ class SmartHRTCoordinator:
             try:
                 self._schedule_recovery_start(self.data.recovery_start_hour)
             except Exception as e:
-                _LOGGER.warning("SmartHRT: Erreur reprogrammation trigger: %s", e)
+                _LOGGER.warning(
+                    "%s Erreur reprogrammation trigger: %s", self._log_prefix(), e
+                )
         self._notify_listeners()
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1593,7 +1668,9 @@ class SmartHRTCoordinator:
         Resets RCth and RPth (and their wind variants) to default values
         and clears the error tracking. Also clears persistent storage.
         """
-        _LOGGER.info("SmartHRT: Resetting learned coefficients to defaults")
+        _LOGGER.info(
+            "%s Resetting learned coefficients to defaults", self._log_prefix()
+        )
         self.data.rcth = DEFAULT_RCTH
         self.data.rpth = DEFAULT_RPTH
         self.data.rcth_lw = DEFAULT_RCTH

@@ -72,9 +72,12 @@ DEFAULT_RECOVERYCALC_HOUR = "23:00:00"
 
 # ADR-004 & ADR-009: Mapping centralisé pour persistance hybride
 # Chaque tuple définit: (clé stockage, attribut data, valeur par défaut, type)
-# Les types supportés: "float", "bool", "str", "datetime" (sérialisé en isoformat)
+# Les types supportés: "float", "bool", "str", "datetime" (isoformat), "time" (HH:MM:SS)
 # Ce mapping est utilisé par coordinator._save/_restore_learned_data()
 PERSISTED_FIELDS: list[tuple[str, str, object, str]] = [
+    # Heures configurables (modifiables via l'interface)
+    ("target_hour", "target_hour", None, "time"),
+    ("recoverycalc_hour", "recoverycalc_hour", None, "time"),
     # Coefficients thermiques
     ("rcth", "rcth", DEFAULT_RCTH, "float"),
     ("rpth", "rpth", DEFAULT_RPTH, "float"),
@@ -90,14 +93,14 @@ PERSISTED_FIELDS: list[tuple[str, str, object, str]] = [
     ("rp_calc_mode", "rp_calc_mode", False, "bool"),
     ("temp_lag_detection_active", "temp_lag_detection_active", False, "bool"),
     ("stop_lag_duration", "stop_lag_duration", 0.0, "float"),
+    # Prévisions météo (ADR-002: persistées pour continuité au redémarrage)
+    ("temperature_forecast_avg", "temperature_forecast_avg", 0.0, "float"),
+    ("wind_speed_forecast_avg", "wind_speed_forecast_avg", 0.0, "float"),
     # Données de session
     ("recovery_start_hour", "recovery_start_hour", None, "datetime"),
     ("time_recovery_calc", "time_recovery_calc", None, "datetime"),
     ("temp_recovery_calc", "temp_recovery_calc", 17.0, "float"),
     ("text_recovery_calc", "text_recovery_calc", 0.0, "float"),
-    # Prévisions météo (ADR-020)
-    ("temperature_forecast_avg", "temperature_forecast_avg", 0.0, "float"),
-    ("wind_speed_forecast_avg", "wind_speed_forecast_avg", 0.0, "float"),
 ]
 
 # Legacy storage keys (kept for backward compatibility imports)
