@@ -1,6 +1,6 @@
 id: 030
 title: "Simplification des sensors avec SensorEntityDescription"
-status: "Proposé"
+status: "Accepté"
 date: "2026-02-03"
 context: |
   Le fichier `sensor.py` contient actuellement 674 lignes avec de nombreuses classes
