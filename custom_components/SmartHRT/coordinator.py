@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 from collections import deque
 
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant, callback, Event
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.event import (
     async_track_time_interval,
@@ -28,8 +28,13 @@ from homeassistant.helpers.event import (
     async_track_point_in_time,
 )
 from homeassistant.helpers.storage import Store
-from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.const import (
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
+    EVENT_HOMEASSISTANT_STARTED,
+)
 from homeassistant.util import dt as dt_util
+from homeassistant.exceptions import ServiceNotFound
 
 from .const import (
     DOMAIN,
@@ -45,7 +50,6 @@ from .const import (
     DEFAULT_RELAXATION_FACTOR,
     WIND_HIGH,
     WIND_LOW,
-    DATA_COORDINATOR,
     FORECAST_HOURS,
     TEMP_DECREASE_THRESHOLD,
     DEFAULT_RECOVERYCALC_HOUR,
@@ -216,6 +220,46 @@ class SmartHRTCoordinator:
         await self._update_initial_states()
         self._setup_listeners()
         self._setup_time_triggers()
+
+        # Différer l'initialisation météo après le démarrage complet de HA
+        # si l'entité météo n'est pas encore disponible
+        if self._weather_entity_id:
+            weather = self._hass.states.get(self._weather_entity_id)
+            if weather is None:
+                _LOGGER.debug(
+                    "%s Entité météo %s pas encore disponible, initialisation différée",
+                    self._log_prefix(),
+                    self._weather_entity_id,
+                )
+                # Différer l'initialisation météo après le démarrage complet
+                self._hass.bus.async_listen_once(
+                    EVENT_HOMEASSISTANT_STARTED, self._on_homeassistant_started
+                )
+            else:
+                # Entité météo déjà disponible, initialisation immédiate
+                await self._complete_weather_setup()
+        else:
+            # Pas d'entité météo configurée
+            await self._complete_weather_setup()
+
+        # Restaurer les triggers et tâches périodiques selon l'état de la machine
+        await self._restore_state_after_restart()
+
+    async def _on_homeassistant_started(self, event: Event) -> None:
+        """Callback appelé après le démarrage complet de Home Assistant.
+
+        Permet d'initialiser les fonctionnalités météo une fois que toutes
+        les intégrations sont chargées.
+        """
+        _LOGGER.info(
+            "%s Home Assistant démarré, initialisation météo de %s",
+            self._log_prefix(),
+            self._weather_entity_id,
+        )
+        await self._complete_weather_setup()
+
+    async def _complete_weather_setup(self) -> None:
+        """Termine l'initialisation des fonctionnalités dépendantes de la météo."""
         await self._update_weather_forecasts()
 
         # Calcul initial de l'heure de relance
@@ -278,17 +322,30 @@ class SmartHRTCoordinator:
                     except (ValueError, TypeError):
                         # Keep current value if parsing fails
                         pass
+                elif field_type == "list":
+                    # Restore list to deque (for wind_speed_history)
+                    if isinstance(stored_value, list):
+                        current_deque = getattr(self.data, attr_name)
+                        if isinstance(current_deque, deque):
+                            current_deque.clear()
+                            current_deque.extend(stored_value)
+                        else:
+                            setattr(
+                                self.data, attr_name, deque(stored_value, maxlen=240)
+                            )
                 else:
                     # Direct assignment for float, bool, str
                     setattr(self.data, attr_name, stored_value)
 
             _LOGGER.debug(
-                "%s Données restaurées: state=%s, rcth=%.2f, rpth=%.2f, recovery_calc_mode=%s",
+                "%s Données restaurées: state=%s, rcth=%.2f, rpth=%.2f, recovery_calc_mode=%s, temp_forecast=%.1f°C, wind_forecast=%.1f",
                 self._log_prefix(),
                 self.data.current_state,
                 self.data.rcth,
                 self.data.rpth,
                 self.data.recovery_calc_mode,
+                self.data.temperature_forecast_avg,
+                self.data.wind_speed_forecast_avg,
             )
         else:
             _LOGGER.debug(
@@ -316,6 +373,14 @@ class SmartHRTCoordinator:
             elif field_type == "time":
                 # Serialize time to HH:MM:SS string
                 data_to_store[storage_key] = value.isoformat() if value else None
+            elif field_type == "list":
+                # Serialize deque to list (for wind_speed_history)
+                if isinstance(value, deque):
+                    data_to_store[storage_key] = list(value)
+                else:
+                    data_to_store[storage_key] = (
+                        value if isinstance(value, list) else []
+                    )
             else:
                 # Direct storage for float, bool, str
                 data_to_store[storage_key] = value

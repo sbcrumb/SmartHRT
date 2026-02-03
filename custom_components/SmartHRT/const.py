@@ -50,15 +50,24 @@ DEVICE_MANUFACTURER = "SmartHRT"
 # Data keys for hass.data[DOMAIN][entry_id]
 DATA_COORDINATOR = "coordinator"
 
-# Service names
+# Service names - Nouveaux services simplifiés
+SERVICE_START_HEATING_CYCLE = "start_heating_cycle"
+SERVICE_STOP_HEATING = "stop_heating"
+SERVICE_START_RECOVERY = "start_recovery"
+SERVICE_END_RECOVERY = "end_recovery"
+SERVICE_GET_STATE = "get_state"
+
+# Service names - Services utilitaires
+SERVICE_RESET_LEARNING = "reset_learning"
+SERVICE_TRIGGER_CALCULATION = "trigger_calculation"
+
+# Service names - Services historiques (conservés pour compatibilité)
 SERVICE_CALCULATE_RECOVERY_TIME = "calculate_recovery_time"
 SERVICE_CALCULATE_RECOVERY_UPDATE_TIME = "calculate_recovery_update_time"
 SERVICE_CALCULATE_RCTH_FAST = "calculate_rcth_fast"
 SERVICE_ON_HEATING_STOP = "on_heating_stop"
 SERVICE_ON_RECOVERY_START = "on_recovery_start"
 SERVICE_ON_RECOVERY_END = "on_recovery_end"
-SERVICE_RESET_LEARNING = "reset_learning"
-SERVICE_TRIGGER_CALCULATION = "trigger_calculation"
 
 # Weather forecast settings
 FORECAST_HOURS = 3
@@ -93,6 +102,8 @@ PERSISTED_FIELDS: list[tuple[str, str, object, str]] = [
     ("rp_calc_mode", "rp_calc_mode", False, "bool"),
     ("temp_lag_detection_active", "temp_lag_detection_active", False, "bool"),
     ("stop_lag_duration", "stop_lag_duration", 0.0, "float"),
+    # Historique vent (ADR-013: moyenne 4h pour calcul coefficients)
+    ("wind_speed_history", "wind_speed_history", [], "list"),
     # Prévisions météo (ADR-002: persistées pour continuité au redémarrage)
     ("temperature_forecast_avg", "temperature_forecast_avg", 0.0, "float"),
     ("wind_speed_forecast_avg", "wind_speed_forecast_avg", 0.0, "float"),
@@ -102,23 +113,3 @@ PERSISTED_FIELDS: list[tuple[str, str, object, str]] = [
     ("temp_recovery_calc", "temp_recovery_calc", 17.0, "float"),
     ("text_recovery_calc", "text_recovery_calc", 0.0, "float"),
 ]
-
-# Legacy storage keys (kept for backward compatibility imports)
-STORAGE_KEY_RCTH = "rcth"
-STORAGE_KEY_RPTH = "rpth"
-STORAGE_KEY_RCTH_LW = "rcth_lw"
-STORAGE_KEY_RCTH_HW = "rcth_hw"
-STORAGE_KEY_RPTH_LW = "rpth_lw"
-STORAGE_KEY_RPTH_HW = "rpth_hw"
-STORAGE_KEY_LAST_RCTH_ERROR = "last_rcth_error"
-STORAGE_KEY_LAST_RPTH_ERROR = "last_rpth_error"
-# State machine and session data
-STORAGE_KEY_CURRENT_STATE = "current_state"
-STORAGE_KEY_RECOVERY_CALC_MODE = "recovery_calc_mode"
-STORAGE_KEY_RP_CALC_MODE = "rp_calc_mode"
-STORAGE_KEY_TEMP_LAG_DETECTION_ACTIVE = "temp_lag_detection_active"
-STORAGE_KEY_RECOVERY_START_HOUR = "recovery_start_hour"
-STORAGE_KEY_TIME_RECOVERY_CALC = "time_recovery_calc"
-STORAGE_KEY_TEMP_RECOVERY_CALC = "temp_recovery_calc"
-STORAGE_KEY_TEXT_RECOVERY_CALC = "text_recovery_calc"
-STORAGE_KEY_STOP_LAG_DURATION = "stop_lag_duration"
