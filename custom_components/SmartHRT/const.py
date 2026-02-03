@@ -81,7 +81,7 @@ DEFAULT_RECOVERYCALC_HOUR = "23:00:00"
 
 # ADR-004 & ADR-009: Mapping centralisé pour persistance hybride
 # Chaque tuple définit: (clé stockage, attribut data, valeur par défaut, type)
-# Les types supportés: "float", "bool", "str", "datetime" (isoformat), "time" (HH:MM:SS)
+# Les types supportés: "float", "bool", "str", "datetime" (isoformat), "time" (HH:MM:SS), "state" (SmartHRTState)
 # Ce mapping est utilisé par coordinator._save/_restore_learned_data()
 PERSISTED_FIELDS: list[tuple[str, str, object, str]] = [
     # Heures configurables (modifiables via l'interface)
@@ -96,8 +96,8 @@ PERSISTED_FIELDS: list[tuple[str, str, object, str]] = [
     ("rpth_hw", "rpth_hw", DEFAULT_RPTH, "float"),
     ("last_rcth_error", "last_rcth_error", 0.0, "float"),
     ("last_rpth_error", "last_rpth_error", 0.0, "float"),
-    # État de la machine à états
-    ("current_state", "current_state", "heating_on", "str"),
+    # État de la machine à états (ADR-028: type "state" pour SmartHRTState)
+    ("current_state", "current_state", "heating_on", "state"),
     ("recovery_calc_mode", "recovery_calc_mode", False, "bool"),
     ("rp_calc_mode", "rp_calc_mode", False, "bool"),
     ("temp_lag_detection_active", "temp_lag_detection_active", False, "bool"),

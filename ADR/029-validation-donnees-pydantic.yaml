@@ -1,0 +1,149 @@
+id: 029
+title: "Validation des données persistées avec Pydantic"
+status: "Proposé"
+date: "2026-02-03"
+context: |
+  Le système actuel de persistance utilise une liste de tuples `PERSISTED_FIELDS`
+  et une logique manuelle de sérialisation/désérialisation dans `_save_learned_data()`
+  et `_restore_learned_data()` :
+
+  ```python
+  # const.py
+  PERSISTED_FIELDS: list[tuple[str, str, object, str]] = [
+      ("rcth", "rcth", DEFAULT_RCTH, "float"),
+      ("recovery_start_hour", "recovery_start_hour", None, "datetime"),
+      # ...
+  ]
+  ```
+
+  ```python
+  # coordinator.py - 80+ lignes de code de sérialisation manuelle
+  for storage_key, attr_name, default_value, field_type in PERSISTED_FIELDS:
+      if field_type == "datetime":
+          setattr(self.data, attr_name, datetime.fromisoformat(stored_value))
+      elif field_type == "time":
+          setattr(self.data, attr_name, self._parse_time(stored_value))
+      elif field_type == "list":
+          # ... logique complexe pour deque
+  ```
+
+  Problèmes identifiés :
+  - Fragile : un changement de format de données peut crasher au chargement
+  - Verbeux : beaucoup de code répétitif pour chaque type
+  - Pas de validation : des valeurs invalides peuvent être chargées silencieusement
+  - Maintenance difficile : ajouter un champ nécessite de modifier plusieurs endroits
+
+decision: |
+  Adopter **Pydantic** pour la validation et la sérialisation des données persistées.
+  Home Assistant utilise de plus en plus Pydantic dans ses intégrations core.
+
+  **Nouveau modèle `models.py` :**
+
+  ```python
+  from datetime import datetime, time as dt_time
+  from pydantic import BaseModel, Field, field_validator
+  from typing import Optional
+
+  from .const import DEFAULT_RCTH, DEFAULT_RPTH, DEFAULT_RELAXATION_FACTOR
+
+  class PersistedData(BaseModel):
+      """Données persistées entre les redémarrages de Home Assistant."""
+      
+      # Coefficients thermiques avec validation de range
+      rcth: float = Field(default=DEFAULT_RCTH, ge=0, le=20000)
+      rpth: float = Field(default=DEFAULT_RPTH, ge=0, le=20000)
+      rcth_lw: float = Field(default=DEFAULT_RCTH, ge=0)
+      rcth_hw: float = Field(default=DEFAULT_RCTH, ge=0)
+      rpth_lw: float = Field(default=DEFAULT_RPTH, ge=0)
+      rpth_hw: float = Field(default=DEFAULT_RPTH, ge=0)
+      relaxation_factor: float = Field(default=DEFAULT_RELAXATION_FACTOR, ge=0.1, le=10)
+      
+      # État machine
+      current_state: str = "heating_on"  # Ou SmartHRTState avec StrEnum
+      recovery_calc_mode: bool = False
+      rp_calc_mode: bool = False
+      
+      # Timestamps (optionnels, sérialisés en ISO)
+      recovery_start_hour: Optional[datetime] = None
+      time_recovery_calc: Optional[datetime] = None
+      
+      # Heures configurables
+      target_hour: dt_time = Field(default_factory=lambda: dt_time(6, 0, 0))
+      recoverycalc_hour: dt_time = Field(default_factory=lambda: dt_time(23, 0, 0))
+      
+      # Historique vent (liste simple, conversion en deque côté coordinator)
+      wind_speed_history: list[float] = Field(default_factory=list)
+      
+      # Prévisions météo
+      temperature_forecast_avg: float = 0.0
+      wind_speed_forecast_avg: float = 0.0
+
+      class Config:
+          # Permet la sérialisation de datetime en isoformat
+          json_encoders = {
+              datetime: lambda v: v.isoformat() if v else None,
+              dt_time: lambda v: v.isoformat() if v else None,
+          }
+      
+      @field_validator('current_state')
+      @classmethod
+      def validate_state(cls, v):
+          valid_states = {"heating_on", "detecting_lag", "monitoring", 
+                          "recovery", "heating_process"}
+          if v not in valid_states:
+              return "heating_on"  # Fallback sécurisé
+          return v
+  ```
+
+  **Utilisation dans le coordinateur :**
+
+  ```python
+  async def _restore_learned_data(self) -> None:
+      stored_data = await self._store.async_load()
+      if stored_data:
+          try:
+              persisted = PersistedData.model_validate(stored_data)
+              # Appliquer à self.data
+              self.data.rcth = persisted.rcth
+              self.data.rpth = persisted.rpth
+              # ... ou utiliser une méthode apply_persisted()
+          except ValidationError as e:
+              _LOGGER.warning("Données persistées invalides: %s", e)
+              # Utiliser les valeurs par défaut
+
+  async def _save_learned_data(self) -> None:
+      persisted = PersistedData(
+          rcth=self.data.rcth,
+          rpth=self.data.rpth,
+          # ...
+      )
+      await self._store.async_save(persisted.model_dump(mode='json'))
+  ```
+
+consequences:
+  positive:
+    - Validation automatique des données au chargement (types, ranges, valeurs)
+    - Sérialisation JSON native sans code manuel
+    - Valeurs par défaut robustes si un champ manque
+    - Réduction du code de ~80 lignes dans coordinator.py
+    - Documentation automatique du schéma de données
+    - Gestion gracieuse des erreurs de format (pas de crash)
+    - Migration de schéma facilitée (ajout/suppression de champs)
+  negative:
+    - Ajout de dépendance Pydantic (mais déjà utilisée par HA Core)
+    - Légère surcharge mémoire pour les modèles
+  risks:
+    - S'assurer que Pydantic est disponible dans l'environnement HACS
+    - Tester la migration des données existantes vers le nouveau format
+
+implementation_notes: |
+  - Pydantic v2 est recommandé (utilisé par HA depuis 2023.x)
+  - Ajouter `pydantic>=2.0` dans `manifest.json` dependencies si nécessaire
+  - Utiliser `model_dump(mode='json')` pour la sérialisation compatible Store
+  - Le `field_validator` permet des validations custom avec fallback
+  - Tester avec des données corrompues pour valider la robustesse
+
+related_adrs:
+  - "ADR-004: Stratégie hybride persistance (implémentation actuelle remplacée)"
+  - "ADR-009: Persistance coefficients (schema défini par Pydantic)"
+  - "ADR-024: Sérialisation types (géré nativement par Pydantic)"

@@ -1,0 +1,159 @@
+id: 032
+title: "Validation renforcée dans le Config Flow"
+status: "Proposé"
+date: "2026-02-03"
+context: |
+  Le coordinateur utilise `entry.options` via un listener pour supporter
+  les changements de configuration à chaud, ce qui est une bonne pratique.
+
+  Cependant, la validation actuelle dans le config_flow ne vérifie pas
+  les contraintes métier entre les paramètres. Des configurations invalides
+  pourraient être acceptées :
+
+  - `rcth_min > rcth_max` (plages inversées)
+  - `target_hour < recoverycalc_hour` sans gestion du passage à minuit
+  - `tsp` en dehors des plages physiquement raisonnables
+  - Entité météo inexistante ou incompatible
+
+  Le fichier `const.py` définit les plages :
+  ```python
+  DEFAULT_RCTH_MIN = 0.0
+  DEFAULT_RCTH_MAX = 19999.0
+  DEFAULT_TSP_MIN = 13.0
+  DEFAULT_TSP_MAX = 26.0
+  ```
+
+  Mais ces contraintes ne sont pas nécessairement appliquées dans le config_flow.
+
+decision: |
+  Renforcer la validation des données dans `config_flow.py` pour empêcher
+  des configurations impossibles ou incohérentes.
+
+  **1. Validation dans le ConfigFlow initial :**
+
+  ```python
+  from homeassistant.exceptions import HomeAssistantError
+
+  class SmartHRTConfigFlow(ConfigFlow, domain=DOMAIN):
+      
+      async def async_step_user(self, user_input=None):
+          errors = {}
+          
+          if user_input is not None:
+              # Validation de l'entité météo
+              weather = self.hass.states.get(user_input.get(CONF_WEATHER_ENTITY))
+              if weather is None:
+                  errors[CONF_WEATHER_ENTITY] = "weather_not_found"
+              elif not self._is_valid_weather_entity(weather):
+                  errors[CONF_WEATHER_ENTITY] = "weather_incompatible"
+              
+              # Validation du capteur de température
+              temp_sensor = self.hass.states.get(user_input.get(CONF_SENSOR_INTERIOR_TEMP))
+              if temp_sensor is None:
+                  errors[CONF_SENSOR_INTERIOR_TEMP] = "sensor_not_found"
+              
+              # Validation TSP dans les limites physiques
+              tsp = user_input.get(CONF_TSP, DEFAULT_TSP)
+              if not (DEFAULT_TSP_MIN <= tsp <= DEFAULT_TSP_MAX):
+                  errors[CONF_TSP] = "tsp_out_of_range"
+              
+              # Validation cohérence horaires
+              target = self._parse_time(user_input.get(CONF_TARGET_HOUR, "06:00"))
+              recovery = self._parse_time(user_input.get(CONF_RECOVERYCALC_HOUR, "23:00"))
+              if not self._validate_time_sequence(recovery, target):
+                  errors["base"] = "invalid_time_sequence"
+              
+              if not errors:
+                  return self.async_create_entry(...)
+          
+          return self.async_show_form(
+              step_id="user",
+              data_schema=self._get_schema(user_input),
+              errors=errors,
+          )
+      
+      def _is_valid_weather_entity(self, state) -> bool:
+          """Vérifie que l'entité météo supporte les prévisions."""
+          return (
+              state.domain == "weather" and
+              state.attributes.get("forecast") is not None
+          )
+      
+      def _validate_time_sequence(self, recoverycalc: time, target: time) -> bool:
+          """Vérifie que recoverycalc_hour est avant target_hour (avec minuit)."""
+          # recoverycalc_hour (23:00) doit précéder target_hour (06:00) le lendemain
+          # Logique: si recoverycalc > target, c'est OK (passage à minuit implicite)
+          # si recoverycalc < target, c'est invalide (même journée, pas de nuit)
+          return recoverycalc > target or target < time(12, 0)
+  ```
+
+  **2. Validation dans l'OptionsFlow (modifications) :**
+
+  ```python
+  class SmartHRTOptionsFlow(OptionsFlow):
+      
+      async def async_step_init(self, user_input=None):
+          errors = {}
+          
+          if user_input is not None:
+              # Validation croisée des coefficients
+              if user_input.get("rcth_min", 0) > user_input.get("rcth_max", 20000):
+                  errors["rcth_min"] = "min_greater_than_max"
+              
+              if user_input.get("rpth_min", 0) > user_input.get("rpth_max", 20000):
+                  errors["rpth_min"] = "min_greater_than_max"
+              
+              # Validation relaxation_factor
+              relax = user_input.get("relaxation_factor", 2.0)
+              if not (0.1 <= relax <= 10.0):
+                  errors["relaxation_factor"] = "relaxation_out_of_range"
+              
+              if not errors:
+                  return self.async_create_entry(title="", data=user_input)
+          
+          return self.async_show_form(...)
+  ```
+
+  **3. Messages d'erreur dans strings.json :**
+
+  ```json
+  {
+    "config": {
+      "error": {
+        "weather_not_found": "Entité météo introuvable",
+        "weather_incompatible": "L'entité météo ne supporte pas les prévisions",
+        "sensor_not_found": "Capteur de température introuvable",
+        "tsp_out_of_range": "Température cible hors limites (13-26°C)",
+        "invalid_time_sequence": "L'heure de coupure doit précéder l'heure cible",
+        "min_greater_than_max": "La valeur minimale dépasse la maximale",
+        "relaxation_out_of_range": "Facteur de relaxation hors limites (0.1-10)"
+      }
+    }
+  }
+  ```
+
+consequences:
+  positive:
+    - Impossible de créer des configurations incohérentes
+    - Feedback immédiat à l'utilisateur lors de la configuration
+    - Moins de cas d'erreur à gérer dans le coordinateur
+    - Meilleure UX avec messages d'erreur explicites
+    - Validation de l'existence des entités référencées
+  negative:
+    - Configuration légèrement plus stricte (moins de flexibilité)
+    - Code supplémentaire dans config_flow.py
+  risks:
+    - S'assurer que les messages d'erreur sont traduits
+    - Tester les cas limites (ex: minuit pile)
+
+implementation_notes: |
+  - Utiliser `vol.Range()` dans le schema pour les validations simples
+  - Les validations croisées nécessitent du code custom
+  - Vérifier l'existence des entités avec `hass.states.get()`
+  - Logger les erreurs de validation pour le debug
+  - Ajouter les traductions dans tous les fichiers de langue
+
+related_adrs:
+  - "ADR-002: Sélection explicite entity météo (validation à renforcer)"
+  - "ADR-010: Inputs dynamiques non hardcodés (validation des entrées)"
+  - "ADR-011: Robustesse cas limites (prévention des erreurs)"

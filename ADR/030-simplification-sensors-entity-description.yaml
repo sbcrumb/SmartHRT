@@ -1,0 +1,180 @@
+id: 030
+title: "Simplification des sensors avec SensorEntityDescription"
+status: "Proposé"
+date: "2026-02-03"
+context: |
+  Le fichier `sensor.py` contient actuellement 674 lignes avec de nombreuses classes
+  répétitives qui ne diffèrent que par quelques propriétés :
+
+  ```python
+  class SmartHRTRCthSensor(SmartHRTBaseSensor):
+      def __init__(self, coordinator, config_entry):
+          super().__init__(coordinator, config_entry)
+          self._attr_name = "RCth"
+          self._attr_unique_id = f"{self._device_id}_rcth_sensor"
+
+      @property
+      def native_value(self) -> float | None:
+          return round(self._coordinator.data.rcth, 2)
+
+      @property
+      def icon(self): return "mdi:home-battery-outline"
+      
+      @property
+      def state_class(self): return SensorStateClass.MEASUREMENT
+      
+      @property
+      def native_unit_of_measurement(self): return UnitOfTime.HOURS
+
+  class SmartHRTRPthSensor(SmartHRTBaseSensor):
+      # Quasi identique, seules 4-5 valeurs changent
+  ```
+
+  On compte ~20 classes de sensors avec un pattern répétitif :
+  - SmartHRTRCthSensor, SmartHRTRPthSensor, SmartHRTRCthFastSensor
+  - SmartHRTWindSpeedSensor, SmartHRTWindSpeedForecastSensor, SmartHRTWindSpeedAvgSensor
+  - SmartHRTTemperatureForecastSensor, SmartHRTInteriorTempSensor, etc.
+
+  Ce code viole le principe DRY (Don't Repeat Yourself) et rend la maintenance
+  difficile : ajouter un attribut commun nécessite de modifier 20 classes.
+
+decision: |
+  Utiliser le pattern **`SensorEntityDescription`** étendu avec des lambdas
+  pour centraliser la définition des sensors.
+
+  **1. Définir une description étendue :**
+
+  ```python
+  from dataclasses import dataclass, field
+  from typing import Callable, Any
+  from homeassistant.components.sensor import SensorEntityDescription
+
+  @dataclass(frozen=True, kw_only=True)
+  class SmartHRTSensorDescription(SensorEntityDescription):
+      """Description étendue pour les sensors SmartHRT."""
+      value_fn: Callable[[SmartHRTData], Any]
+      extra_attrs_fn: Callable[[SmartHRTData], dict] | None = None
+      round_digits: int | None = 2
+  ```
+
+  **2. Définir tous les sensors dans un tuple :**
+
+  ```python
+  SENSOR_DESCRIPTIONS: tuple[SmartHRTSensorDescription, ...] = (
+      SmartHRTSensorDescription(
+          key="rcth",
+          translation_key="rcth",
+          name="RCth",
+          icon="mdi:home-battery-outline",
+          state_class=SensorStateClass.MEASUREMENT,
+          native_unit_of_measurement=UnitOfTime.HOURS,
+          value_fn=lambda data: data.rcth,
+          extra_attrs_fn=lambda data: {
+              "rcth_lw": round(data.rcth_lw, 2),
+              "rcth_hw": round(data.rcth_hw, 2),
+              "last_error": data.last_rcth_error,
+          },
+      ),
+      SmartHRTSensorDescription(
+          key="rpth",
+          translation_key="rpth",
+          name="RPth",
+          icon="mdi:home-lightning-bolt-outline",
+          state_class=SensorStateClass.MEASUREMENT,
+          native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+          value_fn=lambda data: data.rpth,
+          extra_attrs_fn=lambda data: {
+              "rpth_lw": round(data.rpth_lw, 2),
+              "rpth_hw": round(data.rpth_hw, 2),
+              "last_error": data.last_rpth_error,
+          },
+      ),
+      SmartHRTSensorDescription(
+          key="interior_temp",
+          translation_key="interior_temp",
+          name="Température intérieure",
+          icon="mdi:home-thermometer",
+          device_class=SensorDeviceClass.TEMPERATURE,
+          state_class=SensorStateClass.MEASUREMENT,
+          native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+          value_fn=lambda data: data.interior_temp,
+          round_digits=None,  # Pas d'arrondi
+      ),
+      # ... autres sensors définis de manière similaire
+  )
+  ```
+
+  **3. Une seule classe générique :**
+
+  ```python
+  class SmartHRTSensor(CoordinatorEntity[SmartHRTCoordinator], SensorEntity):
+      """Sensor générique SmartHRT basé sur description."""
+      
+      entity_description: SmartHRTSensorDescription
+
+      def __init__(
+          self,
+          coordinator: SmartHRTCoordinator,
+          config_entry: ConfigEntry,
+          description: SmartHRTSensorDescription,
+      ) -> None:
+          super().__init__(coordinator)
+          self.entity_description = description
+          self._attr_unique_id = f"{config_entry.entry_id}_{description.key}"
+          self._attr_has_entity_name = True
+          self._device_id = config_entry.entry_id
+
+      @property
+      def native_value(self) -> Any:
+          value = self.entity_description.value_fn(self.coordinator.data)
+          if value is not None and self.entity_description.round_digits is not None:
+              return round(value, self.entity_description.round_digits)
+          return value
+
+      @property
+      def extra_state_attributes(self) -> dict | None:
+          if self.entity_description.extra_attrs_fn:
+              return self.entity_description.extra_attrs_fn(self.coordinator.data)
+          return None
+  ```
+
+  **4. Setup simplifié :**
+
+  ```python
+  async def async_setup_entry(hass, entry, async_add_entities):
+      coordinator = hass.data[DOMAIN][entry.entry_id][DATA_COORDINATOR]
+      
+      entities = [
+          SmartHRTSensor(coordinator, entry, description)
+          for description in SENSOR_DESCRIPTIONS
+      ]
+      
+      async_add_entities(entities, True)
+  ```
+
+consequences:
+  positive:
+    - Réduction de sensor.py de ~674 lignes à ~150 lignes (-78%)
+    - Ajout d'un nouveau sensor = 10 lignes au lieu d'une classe de 30 lignes
+    - Centralisation des définitions (facile à auditer)
+    - Pattern standard Home Assistant (utilisé par les intégrations core)
+    - Meilleure cohérence (pas de risque d'oublier un attribut)
+    - Support natif des translations_key
+  negative:
+    - Légère perte de flexibilité pour des sensors très spécifiques
+    - Les lambdas peuvent être moins lisibles que des méthodes
+  risks:
+    - Les sensors avec logique complexe (ex: NightStateSensor qui lit sun.sun)
+      peuvent nécessiter une classe dédiée
+
+implementation_notes: |
+  - Garder des classes séparées pour les sensors avec logique spéciale :
+    - `SmartHRTNightStateSensor` (accède à une entité externe)
+    - `SmartHRTTargetHourTimestampSensor` (calcul de date dynamique)
+  - Utiliser `translation_key` pour l'internationalisation
+  - Le pattern est documenté dans la doc officielle HA :
+    https://developers.home-assistant.io/docs/core/entity/#entity-descriptions
+
+related_adrs:
+  - "ADR-012: Exposition entités services (définition des sensors)"
+  - "ADR-027: Héritage DataUpdateCoordinator (CoordinatorEntity)"

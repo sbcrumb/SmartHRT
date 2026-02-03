@@ -1,0 +1,103 @@
+id: 027
+title: "Héritage de DataUpdateCoordinator standard HA"
+status: "Proposé"
+date: "2026-02-03"
+context: |
+  Le fichier `coordinator.py` réimplémente manuellement plusieurs mécanismes
+  que Home Assistant fournit déjà via `DataUpdateCoordinator` :
+
+  - Gestion des listeners : `self._listeners`, `register_listener()`, `_notify_listeners()`
+  - Pattern de notification des entités
+  - Gestion des erreurs et du logging
+
+  Code actuel (lignes 135-142) :
+  ```python
+  self._listeners: list[Callable[[], None]] = []
+  # ... plus loin ...
+  def register_listener(self, listener): ...
+  def unregister_listener(self, listener): ...
+  def _notify_listeners(self): ...
+  ```
+
+  Cette réimplémentation :
+  - Introduit du code supplémentaire à maintenir
+  - Ne bénéficie pas des optimisations de HA (debouncing, gestion d'erreurs)
+  - Peut diverger du comportement attendu par les entités HA
+
+decision: |
+  Faire hériter `SmartHRTCoordinator` de `DataUpdateCoordinator` fourni par
+  Home Assistant.
+
+  Transformation proposée :
+
+  **Avant :**
+  ```python
+  class SmartHRTCoordinator:
+      def __init__(self, hass, entry):
+          self._hass = hass
+          self._listeners = []
+          self.data = SmartHRTData(...)
+  ```
+
+  **Après :**
+  ```python
+  from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+
+  class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
+      def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+          super().__init__(
+              hass,
+              _LOGGER,
+              name=f"SmartHRT {entry.title}",
+              update_interval=timedelta(minutes=1),  # Optionnel si polling non souhaité
+          )
+          # Plus besoin de self._listeners
+          self.data = SmartHRTData(...)
+      
+      async def _async_update_data(self) -> SmartHRTData:
+          """Méthode appelée par le DataUpdateCoordinator pour rafraîchir."""
+          self._update_weather_data()
+          self._update_wind_speed_average()
+          return self.data
+  ```
+
+  **Adaptation des entités (sensor.py) :**
+  ```python
+  from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
+  class SmartHRTBaseSensor(CoordinatorEntity[SmartHRTCoordinator], SensorEntity):
+      def __init__(self, coordinator, config_entry):
+          super().__init__(coordinator)
+          # Plus besoin de register_listener/unregister_listener
+  ```
+
+  Les méthodes manuelles suivantes seront supprimées :
+  - `register_listener()` / `unregister_listener()`
+  - `_notify_listeners()`
+  - Le tracking manuel `self._listeners`
+
+consequences:
+  positive:
+    - Réduction du code (~50 lignes de boilerplate supprimées)
+    - Debouncing automatique des mises à jour
+    - Gestion d'erreurs standardisée avec retry automatique
+    - Meilleur logging et debugging intégrés
+    - Conformité aux patterns recommandés par Home Assistant
+    - Les entités utilisent `CoordinatorEntity` (standard HA)
+  negative:
+    - Le `update_interval` force un polling régulier (peut être désactivé avec `None`)
+    - Légère adaptation du pattern d'initialisation
+    - Les triggers ponctuels (point_in_time) restent gérés séparément
+  risks:
+    - S'assurer que `_async_update_data` ne bloque pas l'event loop
+    - Les calculs lourds doivent rester dans `async_add_executor_job`
+
+implementation_notes: |
+  - Le `DataUpdateCoordinator` gère le polling automatique si `update_interval` est défini
+  - Pour les mises à jour ponctuelles (triggers horaires), appeler `async_request_refresh()`
+  - La méthode `async_set_updated_data(data)` permet de pousser des données sans polling
+  - Les entités doivent hériter de `CoordinatorEntity` pour la synchronisation automatique
+
+related_adrs:
+  - "ADR-026: Extraction modèle thermique (calculs lourds dans executor)"
+  - "ADR-019: Restauration état après redémarrage (compatible avec DataUpdateCoordinator)"

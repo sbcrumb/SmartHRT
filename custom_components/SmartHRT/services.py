@@ -314,10 +314,10 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             _LOGGER.error(error_msg)
             return {"success": False, "error": error_msg}
 
-        # Forcer l'état à HEATING_ON
+        # ADR-028: Forcer l'état via force_state() pour traçabilité
         from .coordinator import SmartHRTState
 
-        coord.data.current_state = SmartHRTState.HEATING_ON
+        coord.force_state(SmartHRTState.HEATING_ON)
         coord.data.rp_calc_mode = False
         coord.data.recovery_calc_mode = False
         coord.data.temp_lag_detection_active = False
@@ -328,7 +328,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
         return {
             "success": True,
-            "state": coord.data.current_state,
+            "state": str(coord.data.current_state),
             "message": "Cycle de chauffage démarré",
         }
 
@@ -350,7 +350,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
         return {
             "success": True,
-            "state": coord.data.current_state,
+            "state": str(coord.data.current_state),
             "recovery_start_hour": (
                 coord.data.recovery_start_hour.isoformat()
                 if coord.data.recovery_start_hour
@@ -376,7 +376,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
         return {
             "success": True,
-            "state": coord.data.current_state,
+            "state": str(coord.data.current_state),
             "time_recovery_start": (
                 coord.data.time_recovery_start.isoformat()
                 if coord.data.time_recovery_start
@@ -403,7 +403,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
         return {
             "success": True,
-            "state": coord.data.current_state,
+            "state": str(coord.data.current_state),
             "time_recovery_end": (
                 coord.data.time_recovery_end.isoformat()
                 if coord.data.time_recovery_end
@@ -428,7 +428,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
         return {
             "success": True,
-            "state": coord.data.current_state,
+            "state": str(coord.data.current_state),
             "smartheating_mode": coord.data.smartheating_mode,
             "recovery_calc_mode": coord.data.recovery_calc_mode,
             "rp_calc_mode": coord.data.rp_calc_mode,

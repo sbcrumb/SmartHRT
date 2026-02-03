@@ -19,6 +19,7 @@ ADR implémentées dans ce module:
 - ADR-023: Protection erreurs setters (try/except dans _schedule_recovery_start)
 - ADR-024: Sérialisation types (PERSISTED_FIELDS avec datetime, time, list)
 - ADR-025: Fréquence dynamique recalcul (calculate_recovery_update_time)
+- ADR-028: Modernisation StrEnum pour machine à états (SmartHRTState, VALID_TRANSITIONS)
 """
 
 import logging
@@ -27,6 +28,7 @@ from datetime import datetime, timedelta, time as dt_time
 from dataclasses import dataclass, field
 from typing import Callable
 from collections import deque
+from enum import StrEnum
 
 from homeassistant.core import HomeAssistant, callback, Event
 from homeassistant.config_entries import ConfigEntry
@@ -67,13 +69,19 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 
-# ADR-003: Machine à états explicite
+# ADR-003 & ADR-028: Machine à états explicite avec StrEnum
 # Les 5 états modélisent le cycle thermique journalier complet
-class SmartHRTState:
-    """États de la machine à états SmartHRT (ADR-003).
+class SmartHRTState(StrEnum):
+    """États de la machine à états SmartHRT (ADR-003, ADR-028).
 
     Cycle de vie:
     HEATING_ON → DETECTING_LAG → MONITORING → RECOVERY → HEATING_PROCESS → HEATING_ON
+
+    StrEnum permet:
+    - Compatibilité JSON native (SmartHRTState.HEATING_ON == "heating_on")
+    - Validation automatique à l'assignation
+    - Itération sur les états: list(SmartHRTState)
+    - Meilleur support IDE et mypy
     """
 
     HEATING_ON = "heating_on"  # État 1: Journée, chauffage actif
@@ -81,6 +89,17 @@ class SmartHRTState:
     MONITORING = "monitoring"  # État 3: Surveillance nocturne, calculs récurrents
     RECOVERY = "recovery"  # État 4: Moment de la relance, calcul RCth
     HEATING_PROCESS = "heating_process"  # État 5: Montée en température, calcul RPth
+
+
+# ADR-028: Table des transitions valides entre états
+# Définit explicitement les transitions autorisées pour la machine à états
+VALID_TRANSITIONS: dict[SmartHRTState, set[SmartHRTState]] = {
+    SmartHRTState.HEATING_ON: {SmartHRTState.DETECTING_LAG},
+    SmartHRTState.DETECTING_LAG: {SmartHRTState.MONITORING},
+    SmartHRTState.MONITORING: {SmartHRTState.RECOVERY, SmartHRTState.HEATING_PROCESS},
+    SmartHRTState.RECOVERY: {SmartHRTState.HEATING_PROCESS},
+    SmartHRTState.HEATING_PROCESS: {SmartHRTState.HEATING_ON},
+}
 
 
 @dataclass
@@ -93,8 +112,8 @@ class SmartHRTData:
     target_hour: dt_time = field(default_factory=lambda: dt_time(6, 0, 0))
     recoverycalc_hour: dt_time = field(default_factory=lambda: dt_time(23, 0, 0))
 
-    # État courant de la machine à états
-    current_state: str = SmartHRTState.HEATING_ON
+    # État courant de la machine à états (ADR-028: typé SmartHRTState)
+    current_state: SmartHRTState = SmartHRTState.HEATING_ON
 
     # Modes (conservés pour compatibilité)
     smartheating_mode: bool = True
@@ -198,6 +217,58 @@ class SmartHRTCoordinator:
         sont configurées, en incluant le nom et l'identifiant unique.
         """
         return f"[{self.data.name}#{self._entry.entry_id[:8]}]"
+
+    def transition_to(self, new_state: SmartHRTState) -> bool:
+        """Effectue une transition d'état si elle est valide (ADR-028).
+
+        Vérifie que la transition est autorisée selon VALID_TRANSITIONS
+        avant de changer l'état. Log un warning si la transition est invalide.
+
+        Args:
+            new_state: Le nouvel état cible (SmartHRTState)
+
+        Returns:
+            True si la transition a été effectuée, False sinon
+        """
+        current = self.data.current_state
+        valid_targets = VALID_TRANSITIONS.get(current, set())
+
+        if new_state in valid_targets:
+            _LOGGER.info(
+                "%s Transition %s → %s",
+                self._log_prefix(),
+                current.value,
+                new_state.value,
+            )
+            self.data.current_state = new_state
+            return True
+
+        _LOGGER.warning(
+            "%s Transition invalide %s → %s (autorisées: %s)",
+            self._log_prefix(),
+            current.value,
+            new_state.value,
+            ", ".join(s.value for s in valid_targets) if valid_targets else "aucune",
+        )
+        return False
+
+    def force_state(self, new_state: SmartHRTState) -> None:
+        """Force un changement d'état sans validation (ADR-028).
+
+        À utiliser uniquement pour la restauration d'état ou les services
+        administratifs. Log l'action pour traçabilité.
+
+        Args:
+            new_state: Le nouvel état à forcer (SmartHRTState)
+        """
+        old_state = self.data.current_state
+        self.data.current_state = new_state
+        _LOGGER.info(
+            "%s État forcé %s → %s",
+            self._log_prefix(),
+            old_state.value,
+            new_state.value,
+        )
 
     @staticmethod
     def _parse_time(time_str: str) -> dt_time:
@@ -341,6 +412,19 @@ class SmartHRTCoordinator:
                             setattr(
                                 self.data, attr_name, deque(stored_value, maxlen=240)
                             )
+                elif field_type == "state":
+                    # ADR-028: Convert string to SmartHRTState enum
+                    try:
+                        setattr(self.data, attr_name, SmartHRTState(stored_value))
+                    except ValueError:
+                        # Invalid state string, use default
+                        _LOGGER.warning(
+                            "%s État invalide '%s', utilisation de '%s'",
+                            self._log_prefix(),
+                            stored_value,
+                            default_value,
+                        )
+                        setattr(self.data, attr_name, SmartHRTState(default_value))
                 else:
                     # Direct assignment for float, bool, str
                     setattr(self.data, attr_name, stored_value)
@@ -389,6 +473,9 @@ class SmartHRTCoordinator:
                     data_to_store[storage_key] = (
                         value if isinstance(value, list) else []
                     )
+            elif field_type == "state":
+                # ADR-028: StrEnum serializes to string automatically
+                data_to_store[storage_key] = str(value) if value else None
             else:
                 # Direct storage for float, bool, str
                 data_to_store[storage_key] = value

@@ -1,0 +1,89 @@
+id: 026
+title: "Extraction du modèle thermique en Pure Python"
+status: "Proposé"
+date: "2026-02-03"
+context: |
+  Le fichier `coordinator.py` mélange actuellement deux responsabilités distinctes :
+  1. La logique d'intégration Home Assistant (listeners, storage, entity management)
+  2. La physique thermique (calculs de RCth/RPth, itérations, interpolation)
+
+  Ce couplage fort présente plusieurs inconvénients :
+  - Tests unitaires difficiles : tester l'algorithme de chauffage nécessite de mocker
+    l'ensemble de l'infrastructure Home Assistant
+  - Réutilisabilité nulle : le modèle thermique ne peut pas être utilisé hors HA
+  - Maintenabilité réduite : un changement dans l'algorithme thermique risque
+    d'impacter la logique HA et vice versa
+  - Le coordinateur fait 1800+ lignes (syndrome du "God Object")
+
+  Les calculs concernés incluent :
+  - `calculate_recovery_time()` avec ses 20 itérations
+  - `calculate_rcth_fast()` pour le calcul dynamique
+  - `_interpolate()` pour la compensation vent
+  - `_update_coefficients()` pour l'apprentissage
+  - Les formules de windchill et de température ressentie
+
+decision: |
+  Extraire la logique thermique dans un module séparé `core/thermal.py` (ou `solver.py`)
+  composé de classes "Pure Python" sans aucune dépendance à `homeassistant`.
+
+  Structure proposée :
+  ```
+  custom_components/SmartHRT/
+  ├── core/
+  │   ├── __init__.py
+  │   ├── thermal.py        # Modèle thermique pure Python
+  │   └── types.py          # Dataclasses partagées
+  ├── coordinator.py        # Orchestration HA uniquement
+  └── ...
+  ```
+
+  Le module `thermal.py` contiendra :
+
+  1. **`ThermalState` (dataclass)** : État thermique instantané
+     - interior_temp, exterior_temp, wind_speed, target_temp, etc.
+     - Aucune référence à datetime HA (utiliser datetime standard)
+
+  2. **`ThermalCoefficients` (dataclass)** : Coefficients appris
+     - rcth, rpth, rcth_lw, rcth_hw, rpth_lw, rpth_hw
+     - relaxation_factor, last_errors
+
+  3. **`ThermalSolver` (classe)** : Algorithme de calcul
+     - `calculate_recovery_duration(state, coefficients, target_hour)` -> float
+     - `update_coefficients(current, measured_error, relaxation_factor)` -> ThermalCoefficients
+     - `interpolate_for_wind(value_low_wind, value_high_wind, wind_speed)` -> float
+     - `calculate_windchill(temp, wind_speed)` -> float
+
+  Le coordinateur deviendra un simple orchestrateur qui :
+  - Collecte les données depuis Home Assistant
+  - Construit un `ThermalState`
+  - Appelle le `ThermalSolver`
+  - Propage les résultats aux entités
+
+consequences:
+  positive:
+    - Tests unitaires du modèle thermique sans mocker Home Assistant
+    - Possibilité de tester l'algorithme avec des données synthétiques
+    - Réduction de la taille du coordinateur de ~40%
+    - Séparation claire des responsabilités (SRP)
+    - Le modèle thermique peut être réutilisé dans d'autres contextes
+    - Facilite l'audit par l'équipe Core de Home Assistant
+  negative:
+    - Refactoring significatif du code existant
+    - Introduction d'une couche d'abstraction supplémentaire
+    - Nécessite de bien définir l'interface entre les couches
+  risks:
+    - Migration des tests existants vers la nouvelle structure
+    - Période de transition où les deux structures coexistent
+
+implementation_notes: |
+  - Commencer par extraire les calculs les plus autonomes (`_interpolate`, windchill)
+  - Migrer ensuite `calculate_recovery_time` en injectant les dépendances
+  - Garder le coordinateur comme façade pour la compatibilité des services
+  - Les tests existants dans `tests/` doivent continuer à passer
+
+related_adrs:
+  - "ADR-003: Machine à états (logique HA à garder dans coordinator)"
+  - "ADR-005: Stratégie pilotage anticipation (à extraire dans ThermalSolver)"
+  - "ADR-006: Apprentissage continu (à extraire dans ThermalSolver)"
+  - "ADR-007: Compensation météo interpolation (à extraire dans ThermalSolver)"
+  - "ADR-022: Calcul itératif (implémentation à migrer dans ThermalSolver)"
