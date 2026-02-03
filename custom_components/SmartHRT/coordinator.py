@@ -15,13 +15,12 @@ ADR implémentées dans ce module:
 
 import logging
 import math
-import asyncio
 from datetime import datetime, timedelta, time as dt_time
 from dataclasses import dataclass, field
 from typing import Callable
 from collections import deque
 
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant, callback, Event
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.event import (
     async_track_time_interval,
@@ -29,7 +28,11 @@ from homeassistant.helpers.event import (
     async_track_point_in_time,
 )
 from homeassistant.helpers.storage import Store
-from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.const import (
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
+    EVENT_HOMEASSISTANT_STARTED,
+)
 from homeassistant.util import dt as dt_util
 from homeassistant.exceptions import ServiceNotFound
 
@@ -211,16 +214,52 @@ class SmartHRTCoordinator:
             self.data.recoverycalc_hour,
         )
 
-        # Attendre que l'entité météo soit disponible avant de continuer
-        if self._weather_entity_id:
-            await self._wait_for_weather_entity()
-
         # Restore learned coefficients from storage
         await self._restore_learned_data()
 
         await self._update_initial_states()
         self._setup_listeners()
         self._setup_time_triggers()
+
+        # Différer l'initialisation météo après le démarrage complet de HA
+        # si l'entité météo n'est pas encore disponible
+        if self._weather_entity_id:
+            weather = self._hass.states.get(self._weather_entity_id)
+            if weather is None:
+                _LOGGER.debug(
+                    "%s Entité météo %s pas encore disponible, initialisation différée",
+                    self._log_prefix(),
+                    self._weather_entity_id,
+                )
+                # Différer l'initialisation météo après le démarrage complet
+                self._hass.bus.async_listen_once(
+                    EVENT_HOMEASSISTANT_STARTED, self._on_homeassistant_started
+                )
+            else:
+                # Entité météo déjà disponible, initialisation immédiate
+                await self._complete_weather_setup()
+        else:
+            # Pas d'entité météo configurée
+            await self._complete_weather_setup()
+
+        # Restaurer les triggers et tâches périodiques selon l'état de la machine
+        await self._restore_state_after_restart()
+
+    async def _on_homeassistant_started(self, event: Event) -> None:
+        """Callback appelé après le démarrage complet de Home Assistant.
+
+        Permet d'initialiser les fonctionnalités météo une fois que toutes
+        les intégrations sont chargées.
+        """
+        _LOGGER.info(
+            "%s Home Assistant démarré, initialisation météo de %s",
+            self._log_prefix(),
+            self._weather_entity_id,
+        )
+        await self._complete_weather_setup()
+
+    async def _complete_weather_setup(self) -> None:
+        """Termine l'initialisation des fonctionnalités dépendantes de la météo."""
         await self._update_weather_forecasts()
 
         # Calcul initial de l'heure de relance
@@ -240,9 +279,6 @@ class SmartHRTCoordinator:
             if update_time:
                 self.data.recovery_update_hour = update_time
                 self._schedule_recovery_update(update_time)
-
-        # Restaurer les triggers et tâches périodiques selon l'état de la machine
-        await self._restore_state_after_restart()
 
     async def _restore_learned_data(self) -> None:
         """Restore learned coefficients and state from persistent storage.
@@ -1090,45 +1126,6 @@ class SmartHRTCoordinator:
     # ─────────────────────────────────────────────────────────────────────────
     # Données météo
     # ─────────────────────────────────────────────────────────────────────────
-
-    async def _wait_for_weather_entity(self) -> None:
-        """Attend que l'entité météo soit disponible avant de continuer l'initialisation.
-
-        Cette méthode attend jusqu'à 30 secondes que l'entité météo soit chargée
-        par Home Assistant avant de continuer avec l'initialisation de SmartHRT.
-        Cela évite les erreurs "Entité météo non trouvée" au démarrage.
-        """
-        max_wait_seconds = 30
-        check_interval = 0.5
-        elapsed = 0.0
-
-        _LOGGER.debug(
-            "%s Attente de la disponibilité de l'entité météo %s...",
-            self._log_prefix(),
-            self._weather_entity_id,
-        )
-
-        while elapsed < max_wait_seconds:
-            weather = self._hass.states.get(self._weather_entity_id)
-            if weather is not None:
-                _LOGGER.info(
-                    "%s Entité météo %s disponible après %.1fs",
-                    self._log_prefix(),
-                    self._weather_entity_id,
-                    elapsed,
-                )
-                return
-
-            await self._hass.async_block_till_done()
-            await asyncio.sleep(check_interval)
-            elapsed += check_interval
-
-        _LOGGER.warning(
-            "%s Entité météo %s toujours non disponible après %ds - poursuite de l'initialisation",
-            self._log_prefix(),
-            self._weather_entity_id,
-            max_wait_seconds,
-        )
 
     def _update_weather_data(self) -> None:
         """Mise à jour des données météo actuelles.
