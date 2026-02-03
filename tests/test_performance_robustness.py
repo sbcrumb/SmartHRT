@@ -174,8 +174,8 @@ class TestPerformanceAndRobustness:
         recovery_times = []
 
         def track_calculate():
-            # Simuler un nouveau temps à chaque calcul
-            new_time = datetime(2026, 2, 3, 20 + len(recovery_times), 0, 0)
+            # Simuler un nouveau temps à chaque calcul (utiliser des minutes différentes pour rester < 24h)
+            new_time = datetime(2026, 2, 3, 20, len(recovery_times) * 5, 0)
             coord.data.recovery_start_hour = new_time
             recovery_times.append(new_time)
 

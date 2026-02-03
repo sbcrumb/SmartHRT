@@ -201,10 +201,12 @@ class TestRecoveryTriggerRescheduling:
         coord.data.recovery_start_hour = None  # Pas d'heure calculée
 
         with patch.object(coord, "_schedule_recovery_start") as mock_schedule:
-            coord.set_rcth(45.0)
+            # Mock calculate_recovery_time pour qu'il ne définisse pas recovery_start_hour
+            with patch.object(coord, "calculate_recovery_time"):
+                coord.set_rcth(45.0)
 
-            # Le trigger ne doit pas être reprogrammé
-            mock_schedule.assert_not_called()
+                # Le trigger ne doit pas être reprogrammé
+                mock_schedule.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_no_rescheduling_if_not_monitoring_state(self, create_coordinator):
@@ -402,9 +404,10 @@ class TestRegressionScenario:
                 # Vérifier que _schedule_recovery_start a été appelé avec la nouvelle heure
                 # (et non l'ancienne heure de 19h26)
                 last_call = mock_track.call_args_list[-1]
+                # async_track_point_in_time(hass, callback, time) - time est le 3ème argument
                 scheduled_time = last_call[0][
-                    1
-                ]  # 2ème argument de async_track_point_in_time
+                    2
+                ]  # 3ème argument de async_track_point_in_time
 
                 assert scheduled_time == final_recovery_time
                 # Cruciale: l'heure programmée doit être 21h08, pas 19h26
@@ -444,7 +447,8 @@ class TestRegressionScenario:
             # Vérifier que le nouveau trigger est programmé à la bonne heure
             mock_track.assert_called()
             last_call = mock_track.call_args_list[-1]
-            callback_func, trigger_time = last_call[0]
+            # async_track_point_in_time(hass, callback, time)
+            hass_arg, callback_func, trigger_time = last_call[0]
 
             assert trigger_time == new_recovery_time
             assert callback_func == coord._on_recovery_start_hour

@@ -390,372 +390,6 @@ class SmartHRTCoordinator:
             "%s Données apprises et état sauvegardés en stockage", self._log_prefix()
         )
 
-    def _determine_expected_state_for_time(self, now: datetime) -> str:
-        """Détermine l'état attendu de la machine à états basé sur l'heure actuelle.
-
-        Cette méthode analyse l'heure actuelle par rapport aux heures configurées
-        (target_hour, recoverycalc_hour, recovery_start_hour) pour déterminer
-        dans quel état la machine devrait logiquement se trouver.
-
-        Logique simplifiée:
-        1. Si recovery_start_hour existe ET now >= recovery_start_hour ET now < target_hour:
-           => HEATING_PROCESS (relance en cours)
-        2. Sinon, on regarde l'heure actuelle:
-           - Entre target_hour et recoverycalc_hour => HEATING_ON (jour)
-           - Sinon (nuit) => MONITORING
-
-        IMPORTANT: recovery_start_hour est un datetime complet (avec date), pas juste
-        une heure. Il faut donc comparer avec now (datetime) et non pas juste les heures.
-
-        Returns:
-            L'état attendu (SmartHRTState.*) pour l'heure donnée.
-        """
-        current_time = now.time()
-        target = self.data.target_hour  # ex: 06:00 (time)
-        recoverycalc = self.data.recoverycalc_hour  # ex: 23:00 (time)
-
-        # recovery_start_hour est un datetime complet (ex: 2026-02-04 05:00:00)
-        # On doit comparer avec now directement, pas juste les heures
-        recovery_start_datetime = self.data.recovery_start_hour  # datetime ou None
-
-        # 1. Si on a dépassé recovery_start_datetime => potentiellement HEATING_PROCESS
-        if recovery_start_datetime and now >= recovery_start_datetime:
-            # Mais on doit aussi vérifier qu'on n'a pas dépassé target_hour
-            # Car après target_hour, on revient à HEATING_ON
-            target_datetime_today = now.replace(
-                hour=target.hour,
-                minute=target.minute,
-                second=0,
-                microsecond=0,
-            )
-            # Si now est après target_hour du même jour que recovery_start_datetime
-            if (
-                now.date() == recovery_start_datetime.date()
-                and now >= target_datetime_today
-            ):
-                return SmartHRTState.HEATING_ON
-            # Si now est le jour suivant et après target_hour
-            if now.date() > recovery_start_datetime.date() and current_time >= target:
-                return SmartHRTState.HEATING_ON
-            # On est bien en période de relance
-            return SmartHRTState.HEATING_PROCESS
-
-        # 2. Déterminer si on est en période "jour" (HEATING_ON) ou "nuit" (MONITORING)
-        # Cas typique: target (matin) < recoverycalc (soir)
-        # Ex: 06:00 < 23:00 => Jour = [06:00, 23:00[
-        if target < recoverycalc:
-            if target <= current_time < recoverycalc:
-                return SmartHRTState.HEATING_ON
-            else:
-                return SmartHRTState.MONITORING
-        else:
-            # Cas atypique: recoverycalc < target (ex: 13:30 < 17:30)
-            # "Nuit" = [recoverycalc, target[, "Jour" = le reste
-            if recoverycalc <= current_time < target:
-                return SmartHRTState.MONITORING
-            else:
-                return SmartHRTState.HEATING_ON
-
-    async def _restore_state_after_restart(self) -> None:
-        """Restaure les triggers et tâches périodiques après redémarrage selon l'état.
-
-        Cette méthode garantit que tous les mécanismes de la machine à états
-        sont correctement reprogrammés après un redémarrage de Home Assistant,
-        évitant ainsi la perte de fonctionnalité selon l'état dans lequel
-        l'instance se trouvait avant le redémarrage.
-
-        IMPORTANT: Cette méthode vérifie d'abord si l'état persisté est cohérent
-        avec l'heure actuelle. Si l'état n'est pas cohérent (ex: état MONITORING
-        persisté mais il est 10h du matin), l'état est corrigé pour correspondre
-        à la période horaire courante.
-        """
-        persisted_state = self.data.current_state
-        now = dt_util.now()
-
-        # Déterminer l'état attendu basé sur l'heure actuelle
-        expected_state = self._determine_expected_state_for_time(now)
-
-        _LOGGER.info(
-            "%s Restauration après redémarrage - État persisté: %s, État attendu (heure): %s",
-            self._log_prefix(),
-            persisted_state,
-            expected_state,
-        )
-
-        # Vérifier la cohérence entre état persisté et état attendu
-        # DETECTING_LAG est un état transitoire court après recoverycalc_hour
-        # On le traite comme cohérent avec MONITORING si on attend MONITORING
-        state_is_coherent = (
-            persisted_state == expected_state
-            or (
-                persisted_state == SmartHRTState.DETECTING_LAG
-                and expected_state == SmartHRTState.MONITORING
-            )
-            or (
-                persisted_state == SmartHRTState.RECOVERY
-                and expected_state == SmartHRTState.HEATING_PROCESS
-            )
-        )
-
-        if not state_is_coherent:
-            _LOGGER.warning(
-                "%s État incohérent détecté - Correction: %s → %s",
-                self._log_prefix(),
-                persisted_state,
-                expected_state,
-            )
-            # Forcer l'état correct et activer les bons modes
-            await self._transition_to_expected_state(expected_state, now)
-            return
-
-        # État cohérent, restaurer les comportements selon l'état persisté
-        current_state = persisted_state
-
-        if current_state == SmartHRTState.DETECTING_LAG:
-            # État 2: En attente de baisse de température
-            # La surveillance périodique est déjà active via _periodic_update
-            _LOGGER.debug(
-                "%s État DETECTING_LAG restauré - Surveillance température active",
-                self._log_prefix(),
-            )
-
-        elif current_state == SmartHRTState.MONITORING:
-            # État 3: Surveillance nocturne avec calculs récurrents
-            _LOGGER.debug(
-                "%s État MONITORING restauré - recovery_calc_mode=%s",
-                self._log_prefix(),
-                self.data.recovery_calc_mode,
-            )
-
-            # Si recovery_calc_mode est actif, recalculer immédiatement
-            if self.data.recovery_calc_mode:
-                # Calculer RCth dynamique et recovery_time
-                await self._hass.async_add_executor_job(self.calculate_rcth_fast)
-                await self._hass.async_add_executor_job(self.calculate_recovery_time)
-                _LOGGER.debug(
-                    "%s Recalcul initial après restauration - RCth_fast=%.2f",
-                    self._log_prefix(),
-                    self.data.rcth_fast,
-                )
-
-                # Programmer le prochain trigger de mise à jour
-                update_time = await self._hass.async_add_executor_job(
-                    self.calculate_recovery_update_time
-                )
-                if update_time:
-                    self.data.recovery_update_hour = update_time
-                    self._schedule_recovery_update(update_time)
-                    _LOGGER.debug(
-                        "%s Trigger recovery_update_hour programmé: %s",
-                        self._log_prefix(),
-                        update_time,
-                    )
-
-            # Reprogrammer le trigger de démarrage de relance si nécessaire
-            if self.data.recovery_start_hour:
-                if self.data.recovery_start_hour > now:
-                    self._schedule_recovery_start(self.data.recovery_start_hour)
-                    _LOGGER.debug(
-                        "%s Trigger recovery_start reprogrammé: %s",
-                        self._log_prefix(),
-                        self.data.recovery_start_hour,
-                    )
-                else:
-                    # L'heure de relance est dépassée, démarrer immédiatement
-                    _LOGGER.info(
-                        "%s Heure de relance dépassée pendant le redémarrage, démarrage immédiat",
-                        self._log_prefix(),
-                    )
-                    self.on_recovery_start()
-
-        elif current_state == SmartHRTState.RECOVERY:
-            # État 4: Moment de la relance - transition rapide vers HEATING_PROCESS
-            # Si on redémarre en plein milieu du moment de relance, passer directement
-            # à HEATING_PROCESS car la relance doit être en cours
-            _LOGGER.info(
-                "%s État RECOVERY restauré pendant redémarrage - Passage à HEATING_PROCESS",
-                self._log_prefix(),
-            )
-            self.data.current_state = SmartHRTState.HEATING_PROCESS
-            self.data.rp_calc_mode = True
-            await self._save_learned_data()
-
-        elif current_state == SmartHRTState.HEATING_PROCESS:
-            # État 5: Montée en température jusqu'à TSP
-            # La surveillance de température est déjà active via _check_temperature_thresholds
-            # qui est appelé dans _periodic_update
-            _LOGGER.debug(
-                "%s État HEATING_PROCESS restauré - Surveillance TSP active (rp_calc_mode=%s)",
-                self._log_prefix(),
-                self.data.rp_calc_mode,
-            )
-
-            # Vérifier si target_hour est dépassée
-            if self.data.target_hour:
-                target_dt = now.replace(
-                    hour=self.data.target_hour.hour,
-                    minute=self.data.target_hour.minute,
-                    second=0,
-                    microsecond=0,
-                )
-                if target_dt < now:
-                    # Target_hour est passée pendant le redémarrage
-                    _LOGGER.info(
-                        "%s Target_hour dépassée pendant le redémarrage - Fin de relance",
-                        self._log_prefix(),
-                    )
-                    if self.data.rp_calc_mode:
-                        self.on_recovery_end()
-
-        elif current_state == SmartHRTState.HEATING_ON:
-            # État 1: Journée normale, rien de spécial à restaurer
-            _LOGGER.debug(
-                "%s État HEATING_ON restauré - Fonctionnement normal",
-                self._log_prefix(),
-            )
-
-        else:
-            # État inconnu ou non géré
-            _LOGGER.warning(
-                "%s État inconnu après restauration: %s - Réinitialisation à HEATING_ON",
-                self._log_prefix(),
-                current_state,
-            )
-            self.data.current_state = SmartHRTState.HEATING_ON
-            await self._save_learned_data()
-
-        self._notify_listeners()
-
-    async def _transition_to_expected_state(
-        self, expected_state: str, now: datetime
-    ) -> None:
-        """Transition vers l'état attendu après détection d'incohérence.
-
-        Cette méthode est appelée lorsque l'état persisté ne correspond pas
-        à l'heure actuelle. Elle configure correctement tous les modes et
-        triggers pour l'état attendu.
-
-        Args:
-            expected_state: L'état vers lequel transitionner (SmartHRTState.*)
-            now: L'heure actuelle
-        """
-        _LOGGER.info(
-            "%s Transition forcée vers l'état %s",
-            self._log_prefix(),
-            expected_state,
-        )
-
-        if expected_state == SmartHRTState.HEATING_ON:
-            # Journée normale - chauffage actif, pas de calculs en cours
-            self.data.current_state = SmartHRTState.HEATING_ON
-            self.data.recovery_calc_mode = False
-            self.data.rp_calc_mode = False
-            self.data.temp_lag_detection_active = False
-            _LOGGER.info(
-                "%s État HEATING_ON initialisé - Mode journée",
-                self._log_prefix(),
-            )
-
-        elif expected_state == SmartHRTState.MONITORING:
-            # Nuit - surveillance et calculs récurrents actifs
-            self.data.current_state = SmartHRTState.MONITORING
-            self.data.recovery_calc_mode = True
-            self.data.rp_calc_mode = False
-            self.data.temp_lag_detection_active = False
-
-            # Initialiser les valeurs de référence si non définies
-            if (
-                self.data.temp_recovery_calc is None
-                or self.data.temp_recovery_calc == 0
-            ):
-                self.data.temp_recovery_calc = self.data.interior_temp or 17.0
-            if self.data.text_recovery_calc is None:
-                self.data.text_recovery_calc = self.data.exterior_temp or 0.0
-            if self.data.time_recovery_calc is None:
-                # Estimer le moment du début de la nuit (recoverycalc_hour)
-                recoverycalc_dt = now.replace(
-                    hour=self.data.recoverycalc_hour.hour,
-                    minute=self.data.recoverycalc_hour.minute,
-                    second=0,
-                    microsecond=0,
-                )
-                if recoverycalc_dt > now:
-                    recoverycalc_dt -= timedelta(days=1)
-                self.data.time_recovery_calc = recoverycalc_dt
-
-            # Calculer RCth dynamique et recovery_time
-            await self._hass.async_add_executor_job(self.calculate_rcth_fast)
-            await self._hass.async_add_executor_job(self.calculate_recovery_time)
-
-            # Programmer les triggers
-            if self.data.recovery_start_hour and self.data.recovery_start_hour > now:
-                self._schedule_recovery_start(self.data.recovery_start_hour)
-
-            update_time = await self._hass.async_add_executor_job(
-                self.calculate_recovery_update_time
-            )
-            if update_time:
-                self.data.recovery_update_hour = update_time
-                self._schedule_recovery_update(update_time)
-
-            _LOGGER.info(
-                "%s État MONITORING initialisé - recovery_start_hour=%s",
-                self._log_prefix(),
-                self.data.recovery_start_hour,
-            )
-
-        elif expected_state == SmartHRTState.HEATING_PROCESS:
-            # Relance en cours - chauffage actif pour atteindre TSP
-            self.data.current_state = SmartHRTState.HEATING_PROCESS
-            self.data.recovery_calc_mode = False
-            self.data.rp_calc_mode = True
-            self.data.temp_lag_detection_active = False
-
-            # Initialiser les valeurs de début de relance si non définies
-            if self.data.time_recovery_start is None:
-                # Estimer le moment du début de relance
-                if self.data.recovery_start_hour:
-                    self.data.time_recovery_start = self.data.recovery_start_hour
-                else:
-                    # Utiliser maintenant comme approximation
-                    self.data.time_recovery_start = now
-            if (
-                self.data.temp_recovery_start is None
-                or self.data.temp_recovery_start == 0
-            ):
-                self.data.temp_recovery_start = self.data.interior_temp or 17.0
-            if self.data.text_recovery_start is None:
-                self.data.text_recovery_start = self.data.exterior_temp or 0.0
-
-            _LOGGER.info(
-                "%s État HEATING_PROCESS initialisé - rp_calc_mode=True, TSP=%.1f°C",
-                self._log_prefix(),
-                self.data.tsp,
-            )
-
-        elif expected_state == SmartHRTState.DETECTING_LAG:
-            # Juste après recoverycalc_hour - attente de baisse de température
-            # Normalement état très court, mais possible si HA redémarre juste après recoverycalc_hour
-            self.data.current_state = SmartHRTState.DETECTING_LAG
-            self.data.recovery_calc_mode = False
-            self.data.rp_calc_mode = False
-            self.data.temp_lag_detection_active = True
-
-            # Initialiser les valeurs de référence
-            self.data.temp_recovery_calc = self.data.interior_temp or 17.0
-            self.data.text_recovery_calc = self.data.exterior_temp or 0.0
-            self.data.time_recovery_calc = now
-
-            _LOGGER.info(
-                "%s État DETECTING_LAG initialisé - temp_recovery_calc=%.1f°C",
-                self._log_prefix(),
-                self.data.temp_recovery_calc,
-            )
-
-        # Sauvegarder le nouvel état
-        await self._save_learned_data()
-        self._notify_listeners()
-
     def _setup_listeners(self) -> None:
         """Configure les listeners pour les capteurs"""
         sensors = [s for s in [self._interior_temp_sensor_id] if s]
@@ -963,6 +597,30 @@ class SmartHRTCoordinator:
         self.data.temp_lag_detection_active = True
         _LOGGER.debug("%s Transition vers état DETECTING_LAG", self._log_prefix())
 
+        # Sauvegarder l'heure de relance avant calcul
+        prev_recovery_start = self.data.recovery_start_hour
+
+        # Exécuter les calculs lourds dans un exécuteur
+        await self._hass.async_add_executor_job(self.calculate_recovery_time)
+
+        # Programmer le trigger de relance si nécessaire (depuis le thread principal)
+        now = dt_util.now()
+        if (
+            self.data.recovery_start_hour
+            and prev_recovery_start != self.data.recovery_start_hour
+            and self.data.recovery_start_hour > now
+        ):
+            self._schedule_recovery_start(self.data.recovery_start_hour)
+
+        # Toujours programmer la mise à jour de recovery_update_hour
+        # pour maintenir la chaîne de mises à jour active
+        update_time = await self._hass.async_add_executor_job(
+            self.calculate_recovery_update_time
+        )
+        if update_time:
+            self.data.recovery_update_hour = update_time
+            self._schedule_recovery_update(update_time)
+
         self._reschedule_recoverycalc_hour()
 
         # Sauvegarder l'état après la transition
@@ -1085,27 +743,28 @@ class SmartHRTCoordinator:
         )
 
     def _schedule_recovery_start(self, trigger_time: datetime) -> None:
-        """Programme le déclencheur de démarrage de relance
+        """Programme le déclencheur de démarrage de relance.
 
-        Corrige le bug yoyo: annule le trigger précédent avant d'en créer un nouveau.
-        Cela empêche l'accumulation de triggers qui causait l'oscillation entre
-        les états RECOVERY et HEATING_PROCESS toutes les minutes.
+        Annule le trigger précédent s'il existe avant d'en programmer un nouveau.
+        Génère des logs appropriés pour la traçabilité.
         """
         # Annuler le trigger précédent s'il existe
-        was_rescheduled = self._unsub_recovery_start is not None
         if self._unsub_recovery_start:
             self._unsub_recovery_start()
-            self._unsub_recovery_start = None
+            _LOGGER.debug(
+                "%s Trigger reprogrammé: annulation du précédent, nouveau à %s",
+                self._log_prefix(),
+                trigger_time,
+            )
+        else:
+            _LOGGER.debug(
+                "%s Nouveau trigger recovery_start programmé: %s",
+                self._log_prefix(),
+                trigger_time,
+            )
 
-        # Programmer le nouveau trigger
         self._unsub_recovery_start = async_track_point_in_time(
             self._hass, self._on_recovery_start_hour, trigger_time
-        )
-        _LOGGER.debug(
-            "%s %s trigger de relance planifié: %s",
-            self._log_prefix(),
-            "Nouveau" if not was_rescheduled else "Trigger reprogrammé -",
-            trigger_time,
         )
 
     @callback
@@ -1653,6 +1312,220 @@ class SmartHRTCoordinator:
 
         self._notify_listeners()
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # ADR-019: Restauration état après redémarrage
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _determine_expected_state_for_time(self, now: datetime) -> str:
+        """Détermine l'état attendu de la machine à états basé sur l'heure actuelle.
+
+        Cette méthode analyse l'heure actuelle par rapport aux heures configurées
+        (target_hour, recoverycalc_hour, recovery_start_hour) pour déterminer
+        dans quel état la machine devrait logiquement se trouver.
+
+        Logique simplifiée:
+        1. Si recovery_start_hour existe ET now >= recovery_start_hour ET now < target_hour:
+           => HEATING_PROCESS (relance en cours)
+        2. Sinon, on regarde l'heure actuelle:
+           - Entre target_hour et recoverycalc_hour => HEATING_ON (jour)
+           - Sinon (nuit) => MONITORING
+
+        Returns:
+            L'état attendu (SmartHRTState.*) pour l'heure donnée.
+        """
+        current_time = now.time()
+        target = self.data.target_hour  # ex: 06:00 (time)
+        recoverycalc = self.data.recoverycalc_hour  # ex: 23:00 (time)
+
+        # recovery_start_hour est un datetime complet (ex: 2026-02-04 05:00:00)
+        recovery_start_datetime = self.data.recovery_start_hour  # datetime ou None
+
+        # 1. Si on a dépassé recovery_start_datetime => potentiellement HEATING_PROCESS
+        if recovery_start_datetime and now >= recovery_start_datetime:
+            # Mais on doit aussi vérifier qu'on n'a pas dépassé target_hour
+            target_datetime_today = now.replace(
+                hour=target.hour,
+                minute=target.minute,
+                second=0,
+                microsecond=0,
+            )
+            # Si now est après target_hour du même jour que recovery_start_datetime
+            if (
+                now.date() == recovery_start_datetime.date()
+                and now >= target_datetime_today
+            ):
+                return SmartHRTState.HEATING_ON
+            # Si now est le jour suivant et après target_hour
+            if now.date() > recovery_start_datetime.date() and current_time >= target:
+                return SmartHRTState.HEATING_ON
+            # On est bien en période de relance
+            return SmartHRTState.HEATING_PROCESS
+
+        # 2. Déterminer si on est en période "jour" (HEATING_ON) ou "nuit" (MONITORING)
+        # Cas typique: target (matin) < recoverycalc (soir)
+        if target < recoverycalc:
+            if target <= current_time < recoverycalc:
+                return SmartHRTState.HEATING_ON
+            else:
+                return SmartHRTState.MONITORING
+        else:
+            # Cas atypique: recoverycalc < target (ex: 13:30 < 17:30)
+            if recoverycalc <= current_time < target:
+                return SmartHRTState.MONITORING
+            else:
+                return SmartHRTState.HEATING_ON
+
+    async def _restore_state_after_restart(self) -> None:
+        """Restaure les triggers et tâches périodiques après redémarrage selon l'état.
+
+        Cette méthode garantit que tous les mécanismes de la machine à états
+        sont correctement reprogrammés après un redémarrage de Home Assistant.
+        """
+        persisted_state = self.data.current_state
+        now = dt_util.now()
+
+        # Déterminer l'état attendu basé sur l'heure actuelle
+        expected_state = self._determine_expected_state_for_time(now)
+
+        _LOGGER.info(
+            "%s Restauration après redémarrage - État persisté: %s, État attendu: %s",
+            self._log_prefix(),
+            persisted_state,
+            expected_state,
+        )
+
+        # Vérifier la cohérence entre état persisté et état attendu
+        state_is_coherent = (
+            persisted_state == expected_state
+            or (
+                persisted_state == SmartHRTState.DETECTING_LAG
+                and expected_state == SmartHRTState.MONITORING
+            )
+            or (
+                persisted_state == SmartHRTState.RECOVERY
+                and expected_state == SmartHRTState.HEATING_PROCESS
+            )
+        )
+
+        if not state_is_coherent:
+            _LOGGER.warning(
+                "%s État incohérent détecté - Correction: %s → %s",
+                self._log_prefix(),
+                persisted_state,
+                expected_state,
+            )
+            await self._transition_to_expected_state(expected_state, now)
+            return
+
+        # État cohérent, restaurer les comportements selon l'état persisté
+        current_state = persisted_state
+
+        if current_state == SmartHRTState.MONITORING:
+            # Reprogrammer le trigger de démarrage de relance si nécessaire
+            if self.data.recovery_start_hour:
+                if self.data.recovery_start_hour > now:
+                    self._schedule_recovery_start(self.data.recovery_start_hour)
+                else:
+                    # L'heure de relance est dépassée, démarrer immédiatement
+                    _LOGGER.info(
+                        "%s Heure de relance dépassée, démarrage immédiat",
+                        self._log_prefix(),
+                    )
+                    self.on_recovery_start()
+
+        elif current_state == SmartHRTState.RECOVERY:
+            # Transition vers HEATING_PROCESS
+            self.data.current_state = SmartHRTState.HEATING_PROCESS
+            self.data.rp_calc_mode = True
+            await self._save_learned_data()
+
+        elif current_state == SmartHRTState.HEATING_PROCESS:
+            # Vérifier si target_hour est dépassée
+            if self.data.target_hour:
+                target_dt = now.replace(
+                    hour=self.data.target_hour.hour,
+                    minute=self.data.target_hour.minute,
+                    second=0,
+                    microsecond=0,
+                )
+                if target_dt < now and self.data.rp_calc_mode:
+                    self.on_recovery_end()
+
+        self._notify_listeners()
+
+    async def _transition_to_expected_state(
+        self, expected_state: str, now: datetime
+    ) -> None:
+        """Transition vers l'état attendu après détection d'incohérence.
+
+        Args:
+            expected_state: L'état vers lequel transitionner (SmartHRTState.*)
+            now: L'heure actuelle
+        """
+        _LOGGER.info(
+            "%s Transition forcée vers l'état %s",
+            self._log_prefix(),
+            expected_state,
+        )
+
+        if expected_state == SmartHRTState.HEATING_ON:
+            self.data.current_state = SmartHRTState.HEATING_ON
+            self.data.recovery_calc_mode = False
+            self.data.rp_calc_mode = False
+            self.data.temp_lag_detection_active = False
+
+        elif expected_state == SmartHRTState.MONITORING:
+            self.data.current_state = SmartHRTState.MONITORING
+            self.data.recovery_calc_mode = True
+            self.data.rp_calc_mode = False
+            self.data.temp_lag_detection_active = False
+
+            # Initialiser les valeurs de référence si non définies
+            if (
+                self.data.temp_recovery_calc is None
+                or self.data.temp_recovery_calc == 0
+            ):
+                self.data.temp_recovery_calc = self.data.interior_temp or 17.0
+            if self.data.text_recovery_calc is None:
+                self.data.text_recovery_calc = self.data.exterior_temp or 0.0
+
+            # Programmer les triggers
+            if self.data.recovery_start_hour and self.data.recovery_start_hour > now:
+                self._schedule_recovery_start(self.data.recovery_start_hour)
+
+        elif expected_state == SmartHRTState.HEATING_PROCESS:
+            self.data.current_state = SmartHRTState.HEATING_PROCESS
+            self.data.recovery_calc_mode = False
+            self.data.rp_calc_mode = True
+            self.data.temp_lag_detection_active = False
+
+            # Initialiser les valeurs de début de relance si non définies
+            if self.data.time_recovery_start is None:
+                if self.data.recovery_start_hour:
+                    self.data.time_recovery_start = self.data.recovery_start_hour
+                else:
+                    self.data.time_recovery_start = now
+            if (
+                self.data.temp_recovery_start is None
+                or self.data.temp_recovery_start == 0
+            ):
+                self.data.temp_recovery_start = self.data.interior_temp or 17.0
+            if self.data.text_recovery_start is None:
+                self.data.text_recovery_start = self.data.exterior_temp or 0.0
+
+        elif expected_state == SmartHRTState.DETECTING_LAG:
+            self.data.current_state = SmartHRTState.DETECTING_LAG
+            self.data.recovery_calc_mode = False
+            self.data.rp_calc_mode = False
+            self.data.temp_lag_detection_active = True
+            self.data.temp_recovery_calc = self.data.interior_temp or 17.0
+            self.data.text_recovery_calc = self.data.exterior_temp or 0.0
+            self.data.time_recovery_calc = now
+
+        # Sauvegarder le nouvel état
+        await self._save_learned_data()
+        self._notify_listeners()
+
     def on_heating_stop(self) -> None:
         """Appelé quand le chauffage s'arrête (service manuel)"""
         self.data.time_recovery_calc = dt_util.now()
@@ -1665,7 +1538,12 @@ class SmartHRTCoordinator:
             self.data.recovery_start_hour
             and self.data.current_state == SmartHRTState.MONITORING
         ):
-            self._schedule_recovery_start(self.data.recovery_start_hour)
+            try:
+                self._schedule_recovery_start(self.data.recovery_start_hour)
+            except Exception as e:
+                _LOGGER.warning(
+                    "%s Erreur reprogrammation trigger: %s", self._log_prefix(), e
+                )
         self._notify_listeners()
 
     def on_recovery_start(self) -> None:
@@ -1760,7 +1638,12 @@ class SmartHRTCoordinator:
             self.data.recovery_start_hour
             and self.data.current_state == SmartHRTState.MONITORING
         ):
-            self._schedule_recovery_start(self.data.recovery_start_hour)
+            try:
+                self._schedule_recovery_start(self.data.recovery_start_hour)
+            except Exception as e:
+                _LOGGER.warning(
+                    "%s Erreur reprogrammation trigger: %s", self._log_prefix(), e
+                )
         self._notify_listeners()
 
     def set_target_hour(self, value: dt_time) -> None:
@@ -1798,7 +1681,12 @@ class SmartHRTCoordinator:
             self.data.recovery_start_hour
             and self.data.current_state == SmartHRTState.MONITORING
         ):
-            self._schedule_recovery_start(self.data.recovery_start_hour)
+            try:
+                self._schedule_recovery_start(self.data.recovery_start_hour)
+            except Exception as e:
+                _LOGGER.warning(
+                    "%s Erreur reprogrammation trigger: %s", self._log_prefix(), e
+                )
         self._notify_listeners()
 
     def set_rpth(self, value: float) -> None:
@@ -1809,7 +1697,12 @@ class SmartHRTCoordinator:
             self.data.recovery_start_hour
             and self.data.current_state == SmartHRTState.MONITORING
         ):
-            self._schedule_recovery_start(self.data.recovery_start_hour)
+            try:
+                self._schedule_recovery_start(self.data.recovery_start_hour)
+            except Exception as e:
+                _LOGGER.warning(
+                    "%s Erreur reprogrammation trigger: %s", self._log_prefix(), e
+                )
         self._notify_listeners()
 
     def set_relaxation_factor(self, value: float) -> None:
@@ -1824,7 +1717,12 @@ class SmartHRTCoordinator:
             self.data.recovery_start_hour
             and self.data.current_state == SmartHRTState.MONITORING
         ):
-            self._schedule_recovery_start(self.data.recovery_start_hour)
+            try:
+                self._schedule_recovery_start(self.data.recovery_start_hour)
+            except Exception as e:
+                _LOGGER.warning(
+                    "%s Erreur reprogrammation trigger: %s", self._log_prefix(), e
+                )
         self._notify_listeners()
 
     def set_rcth_hw(self, value: float) -> None:
@@ -1835,7 +1733,12 @@ class SmartHRTCoordinator:
             self.data.recovery_start_hour
             and self.data.current_state == SmartHRTState.MONITORING
         ):
-            self._schedule_recovery_start(self.data.recovery_start_hour)
+            try:
+                self._schedule_recovery_start(self.data.recovery_start_hour)
+            except Exception as e:
+                _LOGGER.warning(
+                    "%s Erreur reprogrammation trigger: %s", self._log_prefix(), e
+                )
         self._notify_listeners()
 
     def set_rpth_lw(self, value: float) -> None:
@@ -1846,7 +1749,12 @@ class SmartHRTCoordinator:
             self.data.recovery_start_hour
             and self.data.current_state == SmartHRTState.MONITORING
         ):
-            self._schedule_recovery_start(self.data.recovery_start_hour)
+            try:
+                self._schedule_recovery_start(self.data.recovery_start_hour)
+            except Exception as e:
+                _LOGGER.warning(
+                    "%s Erreur reprogrammation trigger: %s", self._log_prefix(), e
+                )
         self._notify_listeners()
 
     def set_rpth_hw(self, value: float) -> None:
@@ -1857,7 +1765,12 @@ class SmartHRTCoordinator:
             self.data.recovery_start_hour
             and self.data.current_state == SmartHRTState.MONITORING
         ):
-            self._schedule_recovery_start(self.data.recovery_start_hour)
+            try:
+                self._schedule_recovery_start(self.data.recovery_start_hour)
+            except Exception as e:
+                _LOGGER.warning(
+                    "%s Erreur reprogrammation trigger: %s", self._log_prefix(), e
+                )
         self._notify_listeners()
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1871,8 +1784,7 @@ class SmartHRTCoordinator:
         and clears the error tracking. Also clears persistent storage.
         """
         _LOGGER.info(
-            "%s Réinitialisation des coefficients apprises aux défauts",
-            self._log_prefix(),
+            "%s Resetting learned coefficients to defaults", self._log_prefix()
         )
         self.data.rcth = DEFAULT_RCTH
         self.data.rpth = DEFAULT_RPTH

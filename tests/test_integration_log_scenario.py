@@ -113,7 +113,8 @@ class TestIntegrationLogScenario:
             ):
 
                 # État initial - trigger programmé à 19h26:18
-                coord.data.recovery_start_hour = datetime(2026, 2, 3, 19, 26, 18)
+                # Simuler l'appel initial de calculate_recovery_time qui définit la première heure
+                mock_calculate_recovery_time(coord)  # Ceci incrémente recovery_times
                 coord._schedule_recovery_start(coord.data.recovery_start_hour)
 
                 # Séquence exacte des changements des logs
