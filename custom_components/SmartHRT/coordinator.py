@@ -1549,9 +1549,8 @@ class SmartHRTCoordinator:
                 self.data.rcth_lw, (hw + relax * hw_new) / (1 + relax)
             )
             self.data.rcth = max(0.1, (self.data.rcth + relax * calc) / (1 + relax))
-
-            # Save updated coefficients to persistent storage
-            self._hass.async_create_task(self._save_learned_data())
+            # Note: La sauvegarde est effectuée par la fonction appelante
+            # (on_recovery_start ou on_recovery_end) pour éviter les doubles sauvegardes
         else:
             lw, hw, calc = (
                 self.data.rpth_lw,
@@ -1578,9 +1577,8 @@ class SmartHRTCoordinator:
             self.data.rpth = min(
                 19999, max(0.1, (self.data.rpth + relax * calc) / (1 + relax))
             )
-
-            # Save updated coefficients to persistent storage
-            self._hass.async_create_task(self._save_learned_data())
+            # Note: La sauvegarde est effectuée par la fonction appelante
+            # (on_recovery_start ou on_recovery_end) pour éviter les doubles sauvegardes
 
     # ─────────────────────────────────────────────────────────────────────────
     # Événements chauffage
