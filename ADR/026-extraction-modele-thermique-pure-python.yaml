@@ -1,7 +1,8 @@
 id: 026
 title: "Extraction du modèle thermique en Pure Python"
-status: "Proposé"
+status: "Accepté"
 date: "2026-02-03"
+implementation_date: "2026-02-05"
 context: |
   Le fichier `coordinator.py` mélange actuellement deux responsabilités distinctes :
   1. La logique d'intégration Home Assistant (listeners, storage, entity management)

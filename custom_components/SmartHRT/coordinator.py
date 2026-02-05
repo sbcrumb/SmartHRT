@@ -4,9 +4,9 @@ ADR implémentées dans ce module:
 - ADR-002: Sélection explicite de l'entité météo (weather_entity_id)
 - ADR-003: Machine à états explicite (SmartHRTState)
 - ADR-004: Stratégie hybride de persistance (_save/_restore_learned_data)
-- ADR-005: Stratégie de pilotage anticipation (calculate_recovery_time)
-- ADR-006: Apprentissage continu (_update_coefficients, relaxation_factor)
-- ADR-007: Compensation météo interpolation vent (_interpolate, rcth_lw/hw)
+- ADR-005: Stratégie de pilotage anticipation (via core.ThermalSolver)
+- ADR-006: Apprentissage continu (via core.ThermalSolver)
+- ADR-007: Compensation météo interpolation vent (via core.ThermalSolver)
 - ADR-008: Validation arrêt par détection lag (TEMP_DECREASE_THRESHOLD)
 - ADR-009: Persistance coefficients (PERSISTED_FIELDS, Store)
 - ADR-013: Historique vent pour calcul (wind_speed_history, wind_speed_avg)
@@ -15,16 +15,16 @@ ADR implémentées dans ce module:
 - ADR-019: Restauration état après redémarrage (_restore_state_after_restart)
 - ADR-020: Initialisation météo différée (EVENT_HOMEASSISTANT_STARTED)
 - ADR-021: Triggers dynamiques (_schedule_recovery_start, async_track_point_in_time)
-- ADR-022: Calcul itératif anticipation (20 itérations dans calculate_recovery_time)
+- ADR-022: Calcul itératif anticipation (via core.ThermalSolver, 20 itérations)
 - ADR-023: Protection erreurs setters (try/except dans _schedule_recovery_start)
 - ADR-024: Sérialisation types (PERSISTED_FIELDS avec datetime, time, list)
-- ADR-025: Fréquence dynamique recalcul (calculate_recovery_update_time)
+- ADR-025: Fréquence dynamique recalcul (via core.ThermalSolver)
+- ADR-026: Extraction modèle thermique (core.ThermalSolver, core.ThermalState)
 - ADR-027: Héritage DataUpdateCoordinator (notifications automatiques, CoordinatorEntity)
 - ADR-028: Modernisation StrEnum pour machine à états (SmartHRTState, VALID_TRANSITIONS)
 """
 
 import logging
-import math
 from datetime import datetime, timedelta, time as dt_time
 from dataclasses import dataclass, field
 from typing import Callable
@@ -67,6 +67,9 @@ from .const import (
     DEFAULT_RECOVERYCALC_HOUR,
     PERSISTED_FIELDS,
 )
+
+# ADR-026: Import du modèle thermique Pure Python
+from .core import ThermalSolver, ThermalState, ThermalCoefficients, ThermalConfig
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -225,6 +228,16 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
         self._interior_temp_sensor_id = entry.data.get(CONF_SENSOR_INTERIOR_TEMP)
         # ADR-002: Entité météo sélectionnée explicitement par l'utilisateur
         self._weather_entity_id = entry.data.get(CONF_WEATHER_ENTITY)
+
+        # ADR-026: Initialisation du solveur thermique Pure Python
+        thermal_config = ThermalConfig(
+            wind_low_kmh=WIND_LOW,
+            wind_high_kmh=WIND_HIGH,
+            default_rcth=DEFAULT_RCTH,
+            default_rpth=DEFAULT_RPTH,
+            default_relaxation_factor=DEFAULT_RELAXATION_FACTOR,
+        )
+        self._thermal_solver = ThermalSolver(thermal_config)
 
     def _log_prefix(self) -> str:
         """Retourne un préfixe pour les logs incluant le nom et entry_id de l'instance.
@@ -1030,118 +1043,96 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
             )
 
     def _calculate_windchill(self) -> None:
-        """Calcul de la température ressentie (windchill)
-        Formule identique au YAML
+        """Calcul de la température ressentie (windchill).
+
+        ADR-026: Délègue au ThermalSolver pour le calcul Pure Python.
         """
         if self.data.exterior_temp is None:
             return
 
-        temp = self.data.exterior_temp
-        wind_ms = self.data.wind_speed  # en m/s
-        wind_kmh = wind_ms * 3.6
-
-        # Formule de windchill (JAG/TI) - active si temp < 10°C et vent > 1.34 m/s (4.824 km/h)
-        # Seuil identique au YAML: wind_speed > 1.34 (m/s)
-        if temp < 10 and wind_ms > 1.34:
-            self.data.windchill = round(
-                13.12
-                + 0.6215 * temp
-                - 11.37 * wind_kmh**0.16
-                + 0.3965 * temp * wind_kmh**0.16,
-                1,
-            )
-        else:
-            self.data.windchill = temp
+        self.data.windchill = self._thermal_solver.calculate_windchill(
+            self.data.exterior_temp,
+            self.data.wind_speed,
+        )
 
     # ─────────────────────────────────────────────────────────────────────────
     # ADR-007: Compensation météo - Interpolation linéaire selon le vent
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _interpolate(self, low: float, high: float, wind_kmh: float) -> float:
-        """Interpole une valeur en fonction du vent (ADR-007).
-
-        Utilise rcth_lw/rcth_hw pour adapter le coefficient thermique
-        selon la vitesse du vent (entre WIND_LOW et WIND_HIGH km/h).
-        """
-        wind_clamped = max(WIND_LOW, min(WIND_HIGH, wind_kmh))
-        ratio = (WIND_HIGH - wind_clamped) / (WIND_HIGH - WIND_LOW)
-        return max(0.1, high + (low - high) * ratio)
-
     def _get_interpolated_rcth(self, wind_kmh: float) -> float:
-        return self._interpolate(self.data.rcth_lw, self.data.rcth_hw, wind_kmh)
+        """Retourne RCth interpolé selon le vent (ADR-026: via ThermalSolver)."""
+        coeffs = self._build_thermal_coefficients()
+        return self._thermal_solver.get_interpolated_rcth(coeffs, wind_kmh)
 
     def _get_interpolated_rpth(self, wind_kmh: float) -> float:
-        return self._interpolate(self.data.rpth_lw, self.data.rpth_hw, wind_kmh)
+        """Retourne RPth interpolé selon le vent (ADR-026: via ThermalSolver)."""
+        coeffs = self._build_thermal_coefficients()
+        return self._thermal_solver.get_interpolated_rpth(coeffs, wind_kmh)
+
+    def _build_thermal_coefficients(self) -> ThermalCoefficients:
+        """Construit un objet ThermalCoefficients depuis les données actuelles.
+
+        ADR-026: Facilite le passage des données au ThermalSolver.
+        """
+        return ThermalCoefficients(
+            rcth=self.data.rcth,
+            rpth=self.data.rpth,
+            rcth_lw=self.data.rcth_lw,
+            rcth_hw=self.data.rcth_hw,
+            rpth_lw=self.data.rpth_lw,
+            rpth_hw=self.data.rpth_hw,
+            rcth_calculated=self.data.rcth_calculated,
+            rpth_calculated=self.data.rpth_calculated,
+            rcth_fast=self.data.rcth_fast,
+            relaxation_factor=self.data.relaxation_factor,
+            last_rcth_error=self.data.last_rcth_error,
+            last_rpth_error=self.data.last_rpth_error,
+        )
+
+    def _build_thermal_state(self) -> ThermalState:
+        """Construit un objet ThermalState depuis les données actuelles.
+
+        ADR-026: Facilite le passage des données au ThermalSolver.
+        """
+        return ThermalState(
+            interior_temp=self.data.interior_temp,
+            exterior_temp=self.data.exterior_temp,
+            windchill=self.data.windchill,
+            wind_speed_ms=self.data.wind_speed,
+            wind_speed_avg_ms=self.data.wind_speed_avg,
+            temperature_forecast_avg=self.data.temperature_forecast_avg,
+            wind_speed_forecast_avg_kmh=self.data.wind_speed_forecast_avg,
+            tsp=self.data.tsp,
+            target_hour=self.data.target_hour,
+            now=dt_util.now(),
+            temp_recovery_calc=self.data.temp_recovery_calc,
+            text_recovery_calc=self.data.text_recovery_calc,
+            temp_recovery_start=self.data.temp_recovery_start,
+            text_recovery_start=self.data.text_recovery_start,
+            temp_recovery_end=self.data.temp_recovery_end,
+            text_recovery_end=self.data.text_recovery_end,
+            time_recovery_calc=self.data.time_recovery_calc,
+            time_recovery_start=self.data.time_recovery_start,
+            time_recovery_end=self.data.time_recovery_end,
+        )
 
     # ─────────────────────────────────────────────────────────────────────────
     # ADR-005: Stratégie de pilotage - Calculs thermiques d'anticipation
     # ─────────────────────────────────────────────────────────────────────────
 
     def calculate_recovery_time(self) -> None:
-        """Calcule l'heure de démarrage de la relance (ADR-005).
+        """Calcule l'heure de démarrage de la relance (ADR-005, ADR-026).
 
-        Équivalent du script calculate_recovery_time du YAML.
+        ADR-026: Délègue au ThermalSolver pour le calcul Pure Python.
         Utilise les prévisions météo et 20 itérations pour affiner la prédiction.
         """
-        # Utiliser 17°C par défaut si la température intérieure n'est pas disponible (comme dans le YAML)
-        tint = self.data.interior_temp if self.data.interior_temp is not None else 17.0
-
-        # Utiliser les prévisions météo comme dans le YAML
-        text = (
-            self.data.temperature_forecast_avg
-            if self.data.temperature_forecast_avg
-            else (self.data.exterior_temp or 0.0)
-        )
-        tsp = self.data.tsp
-
-        # Utiliser les prévisions de vent
-        wind_kmh = (
-            self.data.wind_speed_forecast_avg
-            if self.data.wind_speed_forecast_avg
-            else (self.data.wind_speed * 3.6)
-        )
-
-        rcth = self._get_interpolated_rcth(wind_kmh)
-        rpth = self._get_interpolated_rpth(wind_kmh)
-
         now = dt_util.now()
-        target_dt = now.replace(
-            hour=self.data.target_hour.hour,
-            minute=self.data.target_hour.minute,
-            second=0,
-            microsecond=0,
-        )
-        if target_dt < now:
-            target_dt += timedelta(days=1)
+        state = self._build_thermal_state()
+        coeffs = self._build_thermal_coefficients()
 
-        time_remaining = (target_dt - now).total_seconds() / 3600
-        max_duration = max(time_remaining - 1 / 6, 0)
+        result = self._thermal_solver.calculate_recovery_duration(state, coeffs, now)
 
-        try:
-            ratio = (rpth + text - tint) / (rpth + text - tsp)
-            duree_relance = min(max(rcth * math.log(max(ratio, 0.1)), 0), max_duration)
-        except (ValueError, ZeroDivisionError):
-            duree_relance = max_duration
-
-        # Prédiction itérative (20 itérations comme dans le YAML)
-        for _ in range(20):
-            try:
-                tint_start = text + (tint - text) / math.exp(
-                    (time_remaining - duree_relance) / rcth
-                )
-                ratio = (rpth + text - tint_start) / (rpth + text - tsp)
-                if ratio > 0.1:
-                    duree_relance = min(
-                        (duree_relance + 2 * max(rcth * math.log(ratio), 0)) / 3,
-                        max_duration,
-                    )
-            except (ValueError, ZeroDivisionError):
-                break
-
-        prev_recovery_start = self.data.recovery_start_hour
-        self.data.recovery_start_hour = target_dt - timedelta(
-            seconds=int(duree_relance * 3600)
-        )
+        self.data.recovery_start_hour = result.recovery_start_hour
 
         # Note: Le scheduling du trigger est fait dans le contexte async appelant
         # car async_track_point_in_time doit être appelé depuis le thread principal
@@ -1150,14 +1141,13 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
             "%s Recovery time: %s (%.2fh avant target)",
             self._log_prefix(),
             self.data.recovery_start_hour,
-            duree_relance,
+            result.duration_hours,
         )
 
     def calculate_recovery_update_time(self) -> datetime | None:
-        """Calcule l'heure de mise à jour de la relance
-        Équivalent du script calculate_recoveryupdate_time du YAML
+        """Calcule l'heure de mise à jour de la relance (ADR-026: via ThermalSolver).
 
-        La logique (identique au YAML):
+        La logique:
         - Reconstruit recoverystart_time à partir de l'heure de recovery_start_hour
         - Calcule le temps restant avant la relance
         - Reprogramme dans max(time_remaining/3, 0) secondes, plafonné à 1200s (20min)
@@ -1167,43 +1157,22 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
             return None
 
         now = dt_util.now()
-
-        # Comme dans le YAML: reconstruire recoverystart_time depuis l'heure
-        # de recovery_start_hour (pas le datetime complet)
-        recovery_hour = self.data.recovery_start_hour.hour
-        recovery_minute = self.data.recovery_start_hour.minute
-        recoverystart_time = now.replace(
-            hour=recovery_hour,
-            minute=recovery_minute,
-            second=0,
-            microsecond=0,
+        update_time = self._thermal_solver.calculate_recovery_update_time(
+            self.data.recovery_start_hour,
+            now,
         )
-        if recoverystart_time < now:
-            recoverystart_time += timedelta(days=1)
 
-        time_remaining = (recoverystart_time - now).total_seconds()
-
-        # Recalcule pas plus tard que dans 1200s (20min)
-        # À moins de 30min avant la relance on arrête
-        if time_remaining < 1800:
-            seconds = 3600  # Impose un calcul après la relance
-        else:
-            seconds = min(max(time_remaining / 3, 0), 1200)
-
-        update_time = now + timedelta(seconds=seconds)
-
-        _LOGGER.debug(
-            "%s Recovery update time calculated: %s (time_remaining=%.0fs, seconds=%.0fs)",
-            self._log_prefix(),
-            update_time,
-            time_remaining,
-            seconds,
-        )
+        if update_time:
+            _LOGGER.debug(
+                "%s Recovery update time calculated: %s",
+                self._log_prefix(),
+                update_time,
+            )
 
         return update_time
 
     def calculate_rcth_fast(self) -> None:
-        """Calcule l'évolution dynamique de RCth"""
+        """Calcule l'évolution dynamique de RCth (ADR-026: via ThermalSolver)."""
         if (
             self.data.interior_temp is None
             or self.data.exterior_temp is None
@@ -1211,152 +1180,110 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
         ):
             return
 
-        tint: float = self.data.interior_temp
-        text: float = self.data.exterior_temp
-        tint_off: float = self.data.temp_recovery_calc
-        text_off: float = self.data.text_recovery_calc
-
         dt_hours = (dt_util.now() - self.data.time_recovery_calc).total_seconds() / 3600
-        if dt_hours < 0:
-            dt_hours += 24
 
-        avg_text = (text_off + text) / 2
+        result = self._thermal_solver.calculate_rcth_fast(
+            interior_temp=self.data.interior_temp,
+            exterior_temp=self.data.exterior_temp,
+            temp_at_start=self.data.temp_recovery_calc,
+            text_at_start=self.data.text_recovery_calc,
+            time_since_start_hours=dt_hours,
+        )
 
-        if tint < tint_off and tint > avg_text:
-            try:
-                self.data.rcth_fast = dt_hours / max(
-                    0.0001, math.log((avg_text - tint_off) / (avg_text - tint))
-                )
-            except (ValueError, ZeroDivisionError):
-                pass
+        if result is not None:
+            self.data.rcth_fast = result
 
     def calculate_rcth_at_recovery_start(self) -> None:
-        """Calcule RCth au démarrage de la relance"""
+        """Calcule RCth au démarrage de la relance (ADR-026: via ThermalSolver)."""
         if (
             self.data.time_recovery_start is None
             or self.data.time_recovery_calc is None
         ):
             return
 
-        dt = (
-            self.data.time_recovery_start.timestamp()
-            - self.data.time_recovery_calc.timestamp()
-        ) / 3600
-        avg_text = (self.data.text_recovery_start + self.data.text_recovery_calc) / 2
+        result = self._thermal_solver.calculate_rcth_at_recovery(
+            temp_recovery_calc=self.data.temp_recovery_calc,
+            temp_recovery_start=self.data.temp_recovery_start,
+            text_recovery_calc=self.data.text_recovery_calc,
+            text_recovery_start=self.data.text_recovery_start,
+            time_recovery_calc=self.data.time_recovery_calc,
+            time_recovery_start=self.data.time_recovery_start,
+        )
 
-        try:
-            self.data.rcth_calculated = min(
-                19999,
-                dt
-                / math.log(
-                    (avg_text - self.data.temp_recovery_calc)
-                    / (avg_text - self.data.temp_recovery_start)
-                ),
-            )
-        except (ValueError, ZeroDivisionError):
-            pass
+        if result is not None:
+            self.data.rcth_calculated = result
 
         if self.data.recovery_adaptive_mode:
             self._update_coefficients("rcth")
 
     def calculate_rpth_at_recovery_end(self) -> None:
-        """Calcule RPth à la fin de la relance
+        """Calcule RPth à la fin de la relance (ADR-026: via ThermalSolver).
 
         Utilise wind_speed_avg (moyenne 4h) pour l'interpolation RCth,
-        conformément au YAML original (sensor.wind_speed_avg).
+        conformément au YAML original.
         """
         if self.data.time_recovery_start is None or self.data.time_recovery_end is None:
             return
 
-        dt = (
-            self.data.time_recovery_end.timestamp()
-            - self.data.time_recovery_start.timestamp()
-        ) / 3600
-        avg_text = (self.data.text_recovery_start + self.data.text_recovery_end) / 2
         # Utiliser wind_speed_avg (moyenne 4h) comme dans le YAML
-        rcth_interpol = self._get_interpolated_rcth(self.data.wind_speed_avg * 3.6)
+        wind_kmh = self.data.wind_speed_avg * 3.6
+        rcth_interpol = self._get_interpolated_rcth(wind_kmh)
 
-        try:
-            exp_term = math.exp(dt / rcth_interpol)
-            numerator = (avg_text - self.data.temp_recovery_end) * exp_term - (
-                avg_text - self.data.temp_recovery_start
-            )
-            self.data.rpth_calculated = min(19999, max(0.1, numerator / (1 - exp_term)))
-        except (ValueError, ZeroDivisionError):
-            pass
+        result = self._thermal_solver.calculate_rpth_at_recovery(
+            temp_recovery_start=self.data.temp_recovery_start,
+            temp_recovery_end=self.data.temp_recovery_end,
+            text_recovery_start=self.data.text_recovery_start,
+            text_recovery_end=self.data.text_recovery_end,
+            time_recovery_start=self.data.time_recovery_start,
+            time_recovery_end=self.data.time_recovery_end,
+            rcth_interpolated=rcth_interpol,
+        )
+
+        if result is not None:
+            self.data.rpth_calculated = result
 
         if self.data.recovery_adaptive_mode:
             self._update_coefficients("rpth")
 
     def _update_coefficients(self, coef_type: str) -> None:
-        """Met à jour les coefficients avec relaxation (ADR-006).
+        """Met à jour les coefficients avec relaxation (ADR-006, ADR-026).
 
-        ADR-006: Apprentissage continu
-        - Calcule l'erreur entre valeur mesurée et interpolée
-        - Applique une formule de relaxation pour éviter les oscillations
-        - Met à jour rcth_lw/hw ou rpth_lw/hw selon le vent actuel
-
+        ADR-026: Délègue au ThermalSolver pour le calcul Pure Python.
         Utilise wind_speed_avg (moyenne 4h) conformément au YAML original.
         """
         # Utiliser wind_speed_avg (moyenne 4h) comme dans le YAML
         wind_kmh = self.data.wind_speed_avg * 3.6
-        x = (wind_kmh - WIND_LOW) / (WIND_HIGH - WIND_LOW) - 0.5
-        relax = self.data.relaxation_factor
 
         if coef_type == "rcth":
-            lw, hw, calc = (
-                self.data.rcth_lw,
-                self.data.rcth_hw,
-                self.data.rcth_calculated,
+            result = self._thermal_solver.update_coefficients(
+                coef_type="rcth",
+                current_lw=self.data.rcth_lw,
+                current_hw=self.data.rcth_hw,
+                current_main=self.data.rcth,
+                calculated_value=self.data.rcth_calculated,
+                wind_kmh=wind_kmh,
+                relaxation_factor=self.data.relaxation_factor,
             )
-            interpol = max(0.1, lw + (hw - lw) * (x + 0.5))
-            err = calc - interpol
-
-            # Store error for diagnostics
-            self.data.last_rcth_error = round(err, 3)
-
-            lw_new = max(
-                0.1, lw + err * (1 - 5 / 3 * x - 2 * x * x + 8 / 3 * x * x * x)
-            )
-            hw_new = max(
-                0.1, hw + err * (1 + 5 / 3 * x - 2 * x * x - 8 / 3 * x * x * x)
-            )
-
-            self.data.rcth_lw = min(19999, (lw + relax * lw_new) / (1 + relax))
-            self.data.rcth_hw = min(
-                self.data.rcth_lw, (hw + relax * hw_new) / (1 + relax)
-            )
-            self.data.rcth = max(0.1, (self.data.rcth + relax * calc) / (1 + relax))
+            self.data.rcth_lw = result.coef_lw
+            self.data.rcth_hw = result.coef_hw
+            self.data.rcth = result.coef_main
+            self.data.last_rcth_error = result.error
             # Note: La sauvegarde est effectuée par la fonction appelante
-            # (on_recovery_start ou on_recovery_end) pour éviter les doubles sauvegardes
         else:
-            lw, hw, calc = (
-                self.data.rpth_lw,
-                self.data.rpth_hw,
-                self.data.rpth_calculated,
+            result = self._thermal_solver.update_coefficients(
+                coef_type="rpth",
+                current_lw=self.data.rpth_lw,
+                current_hw=self.data.rpth_hw,
+                current_main=self.data.rpth,
+                calculated_value=self.data.rpth_calculated,
+                wind_kmh=wind_kmh,
+                relaxation_factor=self.data.relaxation_factor,
             )
-            interpol = max(0.1, lw + (hw - lw) * (x + 0.5))
-            err = calc - interpol
-
-            # Store error for diagnostics
-            self.data.last_rpth_error = round(err, 3)
-
-            lw_new = max(
-                0.1, lw + err * (1 - 5 / 3 * x - 2 * x * x + 8 / 3 * x * x * x)
-            )
-            hw_new = max(
-                0.1, hw + err * (1 + 5 / 3 * x - 2 * x * x - 8 / 3 * x * x * x)
-            )
-
-            self.data.rpth_lw = min(19999, (lw + relax * lw_new) / (1 + relax))
-            self.data.rpth_hw = min(
-                self.data.rpth_lw, (hw + relax * hw_new) / (1 + relax)
-            )
-            self.data.rpth = min(
-                19999, max(0.1, (self.data.rpth + relax * calc) / (1 + relax))
-            )
+            self.data.rpth_lw = result.coef_lw
+            self.data.rpth_hw = result.coef_hw
+            self.data.rpth = result.coef_main
+            self.data.last_rpth_error = result.error
             # Note: La sauvegarde est effectuée par la fonction appelante
-            # (on_recovery_start ou on_recovery_end) pour éviter les doubles sauvegardes
 
     # ─────────────────────────────────────────────────────────────────────────
     # Événements chauffage
