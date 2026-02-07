@@ -1,8 +1,7 @@
 """Les constantes pour l'intégration SmartHRT.
 
 ADR implémentées dans ce module:
-- ADR-004: Définition PERSISTED_FIELDS pour persistance hybride
-- ADR-009: Mapping centralisé des champs persistés (coefficients)
+- ADR-041: PERSISTED_FIELDS supprimé, remplacé par SmartHRTData.as_dict/from_dict
 """
 
 from homeassistant.const import Platform
@@ -79,37 +78,6 @@ TEMP_DECREASE_THRESHOLD = 0.2  # °C
 # Default recoverycalc hour (23:00)
 DEFAULT_RECOVERYCALC_HOUR = "23:00:00"
 
-# ADR-004 & ADR-009: Mapping centralisé pour persistance hybride
-# Chaque tuple définit: (clé stockage, attribut data, valeur par défaut, type)
-# Les types supportés: "float", "bool", "str", "datetime" (isoformat), "time" (HH:MM:SS), "state" (SmartHRTState)
-# Ce mapping est utilisé par coordinator._save/_restore_learned_data()
-PERSISTED_FIELDS: list[tuple[str, str, object, str]] = [
-    # Heures configurables (modifiables via l'interface)
-    ("target_hour", "target_hour", None, "time"),
-    ("recoverycalc_hour", "recoverycalc_hour", None, "time"),
-    # Coefficients thermiques
-    ("rcth", "rcth", DEFAULT_RCTH, "float"),
-    ("rpth", "rpth", DEFAULT_RPTH, "float"),
-    ("rcth_lw", "rcth_lw", DEFAULT_RCTH, "float"),
-    ("rcth_hw", "rcth_hw", DEFAULT_RCTH, "float"),
-    ("rpth_lw", "rpth_lw", DEFAULT_RPTH, "float"),
-    ("rpth_hw", "rpth_hw", DEFAULT_RPTH, "float"),
-    ("last_rcth_error", "last_rcth_error", 0.0, "float"),
-    ("last_rpth_error", "last_rpth_error", 0.0, "float"),
-    # État de la machine à états (ADR-028: type "state" pour SmartHRTState)
-    ("current_state", "current_state", "heating_on", "state"),
-    ("recovery_calc_mode", "recovery_calc_mode", False, "bool"),
-    ("rp_calc_mode", "rp_calc_mode", False, "bool"),
-    ("temp_lag_detection_active", "temp_lag_detection_active", False, "bool"),
-    ("stop_lag_duration", "stop_lag_duration", 0.0, "float"),
-    # Historique vent (ADR-013: moyenne 4h pour calcul coefficients)
-    ("wind_speed_history", "wind_speed_history", [], "list"),
-    # Prévisions météo (ADR-002: persistées pour continuité au redémarrage)
-    ("temperature_forecast_avg", "temperature_forecast_avg", 0.0, "float"),
-    ("wind_speed_forecast_avg", "wind_speed_forecast_avg", 0.0, "float"),
-    # Données de session
-    ("recovery_start_hour", "recovery_start_hour", None, "datetime"),
-    ("time_recovery_calc", "time_recovery_calc", None, "datetime"),
-    ("temp_recovery_calc", "temp_recovery_calc", 17.0, "float"),
-    ("text_recovery_calc", "text_recovery_calc", 0.0, "float"),
-]
+# ADR-041: PERSISTED_FIELDS supprimé
+# La sérialisation est maintenant centralisée dans SmartHRTData.as_dict/from_dict
+# Voir coordinator.py pour _PERSISTENT_FIELDS et la logique de migration

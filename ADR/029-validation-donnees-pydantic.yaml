@@ -1,6 +1,6 @@
 id: 029
 title: "Validation des données persistées avec Pydantic"
-status: "Proposé"
+status: "Accepté"
 date: "2026-02-03"
 context: |
   Le système actuel de persistance utilise une liste de tuples `PERSISTED_FIELDS`

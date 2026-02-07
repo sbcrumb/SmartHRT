@@ -1,6 +1,6 @@
 id: 033
 title: "Découplage de la Logique d'État (Pattern State)"
-status: "Proposé"
+status: "Accepté"
 date: "2026-02-07"
 context: |
   L'analyse du code actuel de `SmartHRTCoordinator` montre que bien qu'une 

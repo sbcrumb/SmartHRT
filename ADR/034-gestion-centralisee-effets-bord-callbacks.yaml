@@ -1,6 +1,6 @@
 id: 034
 title: "Gestion Centralisée des Effets de Bord via Callbacks"
-status: "Proposé"
+status: "Accepté"
 date: "2026-02-07"
 context: |
   Dans le code actuel, les actions (allumer le mode relance, sauvegarder les 

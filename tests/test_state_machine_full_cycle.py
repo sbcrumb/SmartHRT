@@ -268,16 +268,19 @@ class TestModeInteractions:
 
     @pytest.mark.asyncio
     async def test_rp_calc_mode_required_for_recovery_end(self, create_coordinator):
-        """Test: rp_calc_mode doit être True pour on_recovery_end."""
+        """Test: on_recovery_end ne fait rien si pas en état HEATING_PROCESS.
+
+        ADR-040: rp_calc_mode est une propriété calculée depuis current_state.
+        rp_calc_mode == True ssi current_state == HEATING_PROCESS.
+        """
         coord = await create_coordinator(
-            initial_state=SmartHRTState.HEATING_PROCESS,
-            rp_calc_mode=False,  # Mode désactivé
+            initial_state=SmartHRTState.HEATING_ON,  # rp_calc_mode sera False
         )
 
         coord.on_recovery_end()
 
-        # L'état ne change pas si rp_calc_mode est False
-        assert coord.data.current_state == SmartHRTState.HEATING_PROCESS
+        # L'état ne change pas si pas en HEATING_PROCESS (rp_calc_mode == False)
+        assert coord.data.current_state == SmartHRTState.HEATING_ON
 
 
 class TestTemperatureThresholds:

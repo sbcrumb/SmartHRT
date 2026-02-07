@@ -1,0 +1,264 @@
+id: 041
+title: "Sérialisation Globale via as_dict/from_dict Centralisés"
+status: "Accepté"
+date: "2026-02-07"
+context: |
+  Le système actuel de persistance utilise `PERSISTED_FIELDS`, un mapping
+  qui liste chaque champ à persister avec son type et sa valeur par défaut.
+  La sérialisation et désérialisation sont effectuées champ par champ avec
+  une logique conditionnelle basée sur le type.
+
+  **Code actuel (const.py + coordinator.py) :**
+
+  ```python
+  # const.py
+  PERSISTED_FIELDS: list[tuple[str, str, object, str]] = [
+      ("rcth", "rcth", DEFAULT_RCTH, "float"),
+      ("rpth", "rpth", DEFAULT_RPTH, "float"),
+      ("recovery_start_hour", "recovery_start_hour", None, "datetime"),
+      ("target_hour", "target_hour", None, "time"),
+      ("current_state", "current_state", "heating_on", "state"),
+      ("wind_speed_history", "wind_speed_history", None, "list"),
+      # ... 25+ autres champs ...
+  ]
+  ```
+
+  ```python
+  # coordinator.py - _save_learned_data (~40 lignes)
+  for storage_key, attr_name, _default, field_type in PERSISTED_FIELDS:
+      value = getattr(self.data, attr_name)
+      if field_type == "datetime":
+          data[storage_key] = value.isoformat() if value else None
+      elif field_type == "time":
+          data[storage_key] = value.isoformat() if value else None
+      elif field_type == "list":
+          data[storage_key] = list(value) if isinstance(value, deque) else value
+      elif field_type == "state":
+          data[storage_key] = str(value) if value else None
+      else:
+          data[storage_key] = value
+  ```
+
+  **Problèmes identifiés :**
+
+  1. **Réinvention de la roue** : Python et des bibliothèques comme `pydantic`
+     ou `dataclasses-json` gèrent déjà la sérialisation automatique.
+  
+  2. **Fragilité** : Ajouter un champ nécessite de modifier `PERSISTED_FIELDS`
+     ET de s'assurer que le type est bien géré dans la logique conditionnelle.
+  
+  3. **Types personnalisés limités** : Le système ne gère que 5 types
+     ("float", "bool", "str", "datetime", "time", "list", "state").
+  
+  4. **Pas de validation** : Aucune vérification que les données chargées
+     sont valides (ex: rcth entre 0 et 20000).
+  
+  5. **Code verbeux** : ~80 lignes pour save + restore qui font la même chose
+     en miroir.
+
+decision: |
+  Centraliser la sérialisation via des méthodes `as_dict()` / `from_dict()` 
+  sur les dataclasses, en s'appuyant sur `dataclasses.asdict()` avec des
+  encodeurs/décodeurs personnalisés.
+
+  **1. Encodeurs/Décodeurs centralisés :**
+
+  ```python
+  # serialization.py
+  from datetime import datetime, time as dt_time
+  from collections import deque
+  from enum import StrEnum
+  from typing import Any
+
+  class JSONEncoder:
+      """Encodeurs pour types non-JSON-natifs."""
+      
+      @staticmethod
+      def encode(value: Any) -> Any:
+          """Encode une valeur Python en type JSON-compatible."""
+          if value is None:
+              return None
+          if isinstance(value, datetime):
+              return {"__type__": "datetime", "value": value.isoformat()}
+          if isinstance(value, dt_time):
+              return {"__type__": "time", "value": value.isoformat()}
+          if isinstance(value, deque):
+              return {"__type__": "deque", "value": list(value), "maxlen": value.maxlen}
+          if isinstance(value, StrEnum):
+              return {"__type__": "enum", "value": str(value)}
+          return value
+      
+      @staticmethod
+      def decode(data: Any, expected_type: type | None = None) -> Any:
+          """Décode une valeur JSON en type Python."""
+          if not isinstance(data, dict) or "__type__" not in data:
+              return data
+          
+          type_name = data["__type__"]
+          value = data["value"]
+          
+          if type_name == "datetime":
+              return datetime.fromisoformat(value)
+          if type_name == "time":
+              return dt_time.fromisoformat(value)
+          if type_name == "deque":
+              maxlen = data.get("maxlen")
+              return deque(value, maxlen=maxlen)
+          if type_name == "enum" and expected_type:
+              return expected_type(value)
+          
+          return value
+  ```
+
+  **2. Méthode as_dict() sur SmartHRTData :**
+
+  ```python
+  @dataclass
+  class SmartHRTData:
+      # ... champs existants ...
+      
+      def as_dict(self, include_volatile: bool = False) -> dict[str, Any]:
+          """Sérialise les données pour persistance.
+          
+          Args:
+              include_volatile: Si True, inclut les données volatiles (météo)
+          
+          Returns:
+              Dictionnaire JSON-compatible.
+          """
+          # Champs à toujours inclure
+          persistent_fields = {
+              "rcth", "rpth", "rcth_lw", "rcth_hw", "rpth_lw", "rpth_hw",
+              "relaxation_factor", "current_state",
+              "target_hour", "recoverycalc_hour",
+              "time_recovery_calc", "time_recovery_start", "time_recovery_end",
+              "temp_recovery_calc", "temp_recovery_start", "temp_recovery_end",
+              "text_recovery_calc", "text_recovery_start", "text_recovery_end",
+              "recovery_start_hour", "recovery_update_hour",
+              "temperature_forecast_avg", "wind_speed_forecast_avg",
+          }
+          
+          # Champs volatiles (non persistés sauf si demandé)
+          volatile_fields = {
+              "interior_temp", "exterior_temp", "wind_speed", "windchill",
+              "wind_speed_avg", "wind_speed_history",
+              "rcth_fast", "rcth_calculated", "rpth_calculated",
+              "last_rcth_error", "last_rpth_error",
+          }
+          
+          fields_to_include = persistent_fields
+          if include_volatile:
+              fields_to_include = fields_to_include | volatile_fields
+          
+          result = {}
+          for field_name in fields_to_include:
+              value = getattr(self, field_name, None)
+              result[field_name] = JSONEncoder.encode(value)
+          
+          return result
+      
+      @classmethod
+      def from_dict(cls, data: dict[str, Any], defaults: "SmartHRTData | None" = None) -> "SmartHRTData":
+          """Désérialise un dictionnaire en SmartHRTData.
+          
+          Args:
+              data: Dictionnaire JSON chargé depuis le stockage
+              defaults: Instance par défaut pour les champs manquants
+          
+          Returns:
+              Nouvelle instance SmartHRTData.
+          """
+          if defaults is None:
+              defaults = cls()
+          
+          # Mapping des champs avec types attendus pour les enums
+          enum_fields = {"current_state": SmartHRTState}
+          
+          kwargs = {}
+          for field_name, default_value in asdict(defaults).items():
+              if field_name in data:
+                  expected_type = enum_fields.get(field_name)
+                  kwargs[field_name] = JSONEncoder.decode(data[field_name], expected_type)
+              else:
+                  kwargs[field_name] = default_value
+          
+          return cls(**kwargs)
+  ```
+
+  **3. Simplification du coordinateur :**
+
+  ```python
+  # coordinator.py
+
+  async def _save_learned_data(self) -> None:
+      """Sauvegarde les données apprises en stockage persistant."""
+      data = self.data.as_dict()
+      await self._store.async_save(data)
+      _LOGGER.debug("%s Données sauvegardées", self._log_prefix())
+
+  async def _restore_learned_data(self) -> None:
+      """Restaure les données apprises depuis le stockage."""
+      stored = await self._store.async_load()
+      if stored:
+          self.data = SmartHRTData.from_dict(stored, defaults=self.data)
+          self._state_machine.force_state(self.data.current_state)
+          _LOGGER.info("%s Données restaurées", self._log_prefix())
+      else:
+          _LOGGER.debug("%s Aucune donnée à restaurer", self._log_prefix())
+  ```
+
+  **4. Suppression de PERSISTED_FIELDS :**
+
+  La liste `PERSISTED_FIELDS` dans `const.py` peut être entièrement supprimée.
+  Les champs à persister sont définis dans `as_dict()` via l'ensemble
+  `persistent_fields`.
+
+  **5. Alternative : Utiliser Pydantic (ADR-029) :**
+
+  Si la validation des données est prioritaire, combiner cette ADR avec ADR-029
+  pour utiliser Pydantic qui offre `model_dump()` et `model_validate()` :
+
+  ```python
+  from pydantic import BaseModel, field_serializer
+
+  class SmartHRTData(BaseModel):
+      rcth: float = Field(default=DEFAULT_RCTH, ge=0, le=20000)
+      current_state: SmartHRTState = SmartHRTState.HEATING_ON
+      target_hour: dt_time = Field(default_factory=lambda: dt_time(6, 0))
+      
+      @field_serializer("target_hour")
+      def serialize_time(self, v: dt_time) -> str:
+          return v.isoformat()
+      
+      # Pydantic gère automatiquement datetime, les validations, etc.
+  ```
+
+consequences:
+  positive:
+    - Suppression de ~60 lignes de code (PERSISTED_FIELDS + logique manuelle)
+    - Logique de sérialisation centralisée et testable isolément
+    - Ajout d'un champ = l'ajouter à `persistent_fields` (1 ligne)
+    - Les types sont encodés de manière auto-descriptive (`__type__`)
+    - Compatible avec une future migration vers Pydantic
+  negative:
+    - Le format de stockage change (migration nécessaire)
+    - Les objets encodés sont légèrement plus verbeux ({"__type__": "datetime", ...})
+    - Nécessite de gérer la migration des données existantes
+  risks:
+    - Migration des données stockées par les utilisateurs existants
+    - Tester exhaustivement les cas limites (None, valeurs par défaut, etc.)
+
+implementation_notes: |
+  - Implémenter `JSONEncoder` dans un module séparé `serialization.py`
+  - Ajouter une version au format de stockage pour gérer les migrations
+  - Prévoir un chemin de migration depuis l'ancien format PERSISTED_FIELDS :
+  
+  ```python
+  async def _restore_learned_data(self) -> None:
+      stored = await self._store.async_load()
+      if stored:
+          # Détecter l'ancien format (pas de __type__ dans les valeurs)
+          if "rcth" in stored and not isinstance(stored.get("current_state"), dict):
+              stored = self._migrate_legacy_format(stored)
+          self.data = SmartHRTData.from_dict(stored, defaults=self.data)
+  ```

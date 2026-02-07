@@ -143,7 +143,7 @@ class TestTransitionDetectingLagToMonitoring:
 
             coord = await coordinator_detecting_lag()
             coord.data.current_state = SmartHRTState.DETECTING_LAG
-            coord.data.temp_lag_detection_active = True
+            # ADR-040: flag calculé depuis state (DETECTING_LAG → True)
             coord.data.temp_recovery_calc = 19.0
 
             # Simuler une baisse de température >= 0.2°C
@@ -160,7 +160,7 @@ class TestTransitionDetectingLagToMonitoring:
         """Vérifie qu'il n'y a pas de transition si baisse < 0.2°C."""
         coord = await coordinator_detecting_lag()
         coord.data.current_state = SmartHRTState.DETECTING_LAG
-        coord.data.temp_lag_detection_active = True
+        # ADR-040: flag calculé depuis state (DETECTING_LAG → True)
         coord.data.temp_recovery_calc = 19.0
 
         # Baisse insuffisante
@@ -182,7 +182,7 @@ class TestTransitionDetectingLagToMonitoring:
 
             coord = await coordinator_detecting_lag()
             coord.data.current_state = SmartHRTState.DETECTING_LAG
-            coord.data.temp_lag_detection_active = True
+            # ADR-040: flag calculé depuis state (DETECTING_LAG → True)
             coord.data.temp_recovery_calc = 19.0
             coord.data.interior_temp = 18.8
 
@@ -201,7 +201,7 @@ class TestTransitionDetectingLagToMonitoring:
 
             coord = await coordinator_detecting_lag()
             coord.data.current_state = SmartHRTState.DETECTING_LAG
-            coord.data.temp_lag_detection_active = True
+            # ADR-040: flag calculé depuis state (DETECTING_LAG → True)
             coord.data.temp_recovery_calc = 19.0
             coord.data.interior_temp = 18.8
 
@@ -221,7 +221,7 @@ class TestTransitionDetectingLagToMonitoring:
 
             coord = await coordinator_detecting_lag()
             coord.data.current_state = SmartHRTState.DETECTING_LAG
-            coord.data.temp_lag_detection_active = True
+            # ADR-040: flag calculé depuis state (DETECTING_LAG → True)
             coord.data.temp_recovery_calc = 19.0
             coord.data.time_recovery_calc = datetime(2026, 2, 3, 23, 0, 0)
             coord.data.interior_temp = 18.8
@@ -314,7 +314,7 @@ class TestTransitionMonitoringToRecovery:
             mock_dt.now.return_value = mock_now
 
             coord = await coordinator_monitoring()
-            coord.data.recovery_calc_mode = True
+            # ADR-040: flag calculé depuis state (MONITORING → True)
 
             coord.on_recovery_start()
 
@@ -381,7 +381,7 @@ class TestTransitionHeatingProcessToHeatingOn:
 
             coord = await coordinator_heating_process()
             coord.data.tsp = 19.0
-            coord.data.rp_calc_mode = True
+            # ADR-040: flag calculé depuis state (HEATING_PROCESS → True)
 
             # Température atteint la consigne
             coord.data.interior_temp = 19.0
@@ -399,7 +399,7 @@ class TestTransitionHeatingProcessToHeatingOn:
 
             coord = await coordinator_heating_process()
             coord.data.tsp = 19.0
-            coord.data.rp_calc_mode = True
+            # ADR-040: flag calculé depuis state (HEATING_PROCESS → True)
 
             # Température dépasse la consigne
             coord.data.interior_temp = 19.5
@@ -413,7 +413,7 @@ class TestTransitionHeatingProcessToHeatingOn:
         """Vérifie qu'il n'y a pas de transition si TSP non atteint."""
         coord = await coordinator_heating_process()
         coord.data.tsp = 19.0
-        coord.data.rp_calc_mode = True
+        # ADR-040: flag calculé depuis state (HEATING_PROCESS → True)
         coord.data.interior_temp = 18.5
 
         coord._check_temperature_thresholds()
@@ -431,7 +431,7 @@ class TestTransitionHeatingProcessToHeatingOn:
 
             coord = await coordinator_heating_process()
             coord.data.tsp = 19.0
-            coord.data.rp_calc_mode = True
+            # ADR-040: flag calculé depuis state (HEATING_PROCESS → True)
             coord.data.interior_temp = 19.0
 
             coord._check_temperature_thresholds()
@@ -449,7 +449,7 @@ class TestTransitionHeatingProcessToHeatingOn:
 
             coord = await coordinator_heating_process()
             coord.data.tsp = 19.0
-            coord.data.rp_calc_mode = True
+            # ADR-040: flag calculé depuis state (HEATING_PROCESS → True)
             coord.data.interior_temp = 19.0
             coord.data.exterior_temp = 4.5
 
@@ -468,7 +468,7 @@ class TestTransitionHeatingProcessToHeatingOn:
 
             coord = await coordinator_heating_process()
             coord.data.tsp = 19.0
-            coord.data.rp_calc_mode = True
+            # ADR-040: flag calculé depuis state (HEATING_PROCESS → True)
             coord.data.interior_temp = 18.5  # TSP non atteint
 
             # Simuler l'appel à on_recovery_end (déclenché par target_hour)
@@ -484,10 +484,13 @@ class TestInvalidTransitions:
     async def test_recovery_start_ignored_if_already_in_recovery(
         self, create_coordinator
     ):
-        """Vérifie que on_recovery_start est ignoré si déjà en RECOVERY."""
+        """Vérifie que on_recovery_start est ignoré si déjà en RECOVERY.
+
+        ADR-040: rp_calc_mode est une propriété calculée (True ssi HEATING_PROCESS).
+        """
         coord = await create_coordinator(
             initial_state=SmartHRTState.RECOVERY,
-            rp_calc_mode=True,
+            # ADR-040: rp_calc_mode est calculé depuis state, pas besoin de le setter
         )
 
         # Le callback _on_recovery_start_hour vérifie l'état
@@ -506,16 +509,18 @@ class TestInvalidTransitions:
     async def test_recovery_end_ignored_if_not_in_rp_calc_mode(
         self, create_coordinator
     ):
-        """Vérifie que on_recovery_end est ignoré si rp_calc_mode est False."""
+        """Vérifie que on_recovery_end est ignoré si pas en HEATING_PROCESS.
+
+        ADR-040: rp_calc_mode est une propriété calculée (True ssi HEATING_PROCESS).
+        """
         coord = await create_coordinator(
-            initial_state=SmartHRTState.HEATING_PROCESS,
-            rp_calc_mode=False,
+            initial_state=SmartHRTState.MONITORING,  # rp_calc_mode sera False
         )
 
         coord.on_recovery_end()
 
-        # L'état ne devrait pas changer car rp_calc_mode est False
-        assert coord.data.current_state == SmartHRTState.HEATING_PROCESS
+        # L'état ne devrait pas changer car rp_calc_mode (calculé) est False
+        assert coord.data.current_state == SmartHRTState.MONITORING
 
     @pytest.mark.asyncio
     async def test_smartheating_mode_off_blocks_transitions(self, create_coordinator):
@@ -538,35 +543,17 @@ class TestModeFlags:
         """Vérifie les flags en état HEATING_ON."""
         coord = await create_coordinator(initial_state=SmartHRTState.HEATING_ON)
 
-        # En HEATING_ON, tous les modes de calcul devraient être off
-        expected_flags = {
-            "recovery_calc_mode": False,
-            "rp_calc_mode": False,
-            "temp_lag_detection_active": False,
-        }
-
-        # Après _transition_to_expected_state pour HEATING_ON
-        coord.data.recovery_calc_mode = False
-        coord.data.rp_calc_mode = False
-        coord.data.temp_lag_detection_active = False
-
-        assert coord.data.recovery_calc_mode == expected_flags["recovery_calc_mode"]
-        assert coord.data.rp_calc_mode == expected_flags["rp_calc_mode"]
-        assert (
-            coord.data.temp_lag_detection_active
-            == expected_flags["temp_lag_detection_active"]
-        )
+        # ADR-040: En HEATING_ON, tous les flags sont False (calculés depuis state)
+        assert coord.data.recovery_calc_mode is False
+        assert coord.data.rp_calc_mode is False
+        assert coord.data.temp_lag_detection_active is False
 
     @pytest.mark.asyncio
     async def test_detecting_lag_mode_flags(self, create_coordinator):
         """Vérifie les flags en état DETECTING_LAG."""
         coord = await create_coordinator(initial_state=SmartHRTState.DETECTING_LAG)
 
-        # En DETECTING_LAG
-        coord.data.temp_lag_detection_active = True
-        coord.data.recovery_calc_mode = False
-        coord.data.rp_calc_mode = False
-
+        # ADR-040: En DETECTING_LAG, temp_lag_detection_active est True (calculé depuis state)
         assert coord.data.temp_lag_detection_active is True
         assert coord.data.recovery_calc_mode is False
         assert coord.data.rp_calc_mode is False
@@ -576,11 +563,7 @@ class TestModeFlags:
         """Vérifie les flags en état MONITORING."""
         coord = await create_coordinator(initial_state=SmartHRTState.MONITORING)
 
-        # En MONITORING
-        coord.data.recovery_calc_mode = True
-        coord.data.temp_lag_detection_active = False
-        coord.data.rp_calc_mode = False
-
+        # ADR-040: En MONITORING, recovery_calc_mode est True (calculé depuis state)
         assert coord.data.recovery_calc_mode is True
         assert coord.data.temp_lag_detection_active is False
         assert coord.data.rp_calc_mode is False
@@ -590,11 +573,7 @@ class TestModeFlags:
         """Vérifie les flags en état HEATING_PROCESS."""
         coord = await create_coordinator(initial_state=SmartHRTState.HEATING_PROCESS)
 
-        # En HEATING_PROCESS
-        coord.data.rp_calc_mode = True
-        coord.data.recovery_calc_mode = False
-        coord.data.temp_lag_detection_active = False
-
+        # ADR-040: En HEATING_PROCESS, rp_calc_mode est True (calculé depuis state)
         assert coord.data.rp_calc_mode is True
         assert coord.data.recovery_calc_mode is False
         assert coord.data.temp_lag_detection_active is False

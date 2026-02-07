@@ -1,6 +1,6 @@
 id: 035
 title: "Immuabilité de l'État et Transitions Atomiques"
-status: "Proposé"
+status: "Accepté"
 date: "2026-02-07"
 context: |
   L'objet `SmartHRTData` est muté directement à plusieurs endroits du code.

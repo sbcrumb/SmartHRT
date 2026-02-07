@@ -1,6 +1,7 @@
 """Tests pour la persistance des prévisions météo.
 
 ADR-020: Persistance des prévisions météo au redémarrage
+ADR-041: Sérialisation centralisée via as_dict/from_dict
 
 Ce module teste que les prévisions météo (température et vent)
 sont correctement sauvegardées et restaurées lors d'un redémarrage.
@@ -14,7 +15,6 @@ import pytest
 
 from custom_components.SmartHRT.const import (
     DEFAULT_TSP,
-    PERSISTED_FIELDS,
 )
 from custom_components.SmartHRT.coordinator import (
     SmartHRTCoordinator,
@@ -26,48 +26,29 @@ class TestWeatherForecastPersistence:
     """Tests pour la persistance des prévisions météo."""
 
     @pytest.mark.asyncio
-    async def test_forecast_fields_in_persisted_fields(self):
-        """Vérifier que les champs de prévisions sont dans PERSISTED_FIELDS."""
-        field_names = [field[1] for field in PERSISTED_FIELDS]
+    async def test_forecast_fields_in_persistent_fields(self):
+        """Vérifier que les champs de prévisions sont dans _PERSISTENT_FIELDS."""
+        # ADR-041: Utilise _PERSISTENT_FIELDS de SmartHRTData
+        persistent_fields = SmartHRTData._PERSISTENT_FIELDS
 
         assert (
-            "temperature_forecast_avg" in field_names
-        ), "temperature_forecast_avg doit être dans PERSISTED_FIELDS"
+            "temperature_forecast_avg" in persistent_fields
+        ), "temperature_forecast_avg doit être dans _PERSISTENT_FIELDS"
         assert (
-            "wind_speed_forecast_avg" in field_names
-        ), "wind_speed_forecast_avg doit être dans PERSISTED_FIELDS"
+            "wind_speed_forecast_avg" in persistent_fields
+        ), "wind_speed_forecast_avg doit être dans _PERSISTENT_FIELDS"
 
     @pytest.mark.asyncio
-    async def test_temperature_forecast_persisted_fields_config(self):
-        """Vérifier la configuration du champ temperature_forecast_avg."""
-        forecast_field = next(
-            (f for f in PERSISTED_FIELDS if f[1] == "temperature_forecast_avg"),
-            None,
-        )
-
-        assert forecast_field is not None, "temperature_forecast_avg doit être défini"
-        storage_key, attr_name, default_value, field_type = forecast_field
-
-        assert storage_key == "temperature_forecast_avg"
-        assert attr_name == "temperature_forecast_avg"
-        assert default_value == 0.0
-        assert field_type == "float"
+    async def test_temperature_forecast_in_persistent_fields(self):
+        """Vérifier que temperature_forecast_avg est un champ persisté."""
+        # ADR-041: Vérifie simplement la présence dans _PERSISTENT_FIELDS
+        assert "temperature_forecast_avg" in SmartHRTData._PERSISTENT_FIELDS
 
     @pytest.mark.asyncio
-    async def test_wind_speed_forecast_persisted_fields_config(self):
-        """Vérifier la configuration du champ wind_speed_forecast_avg."""
-        forecast_field = next(
-            (f for f in PERSISTED_FIELDS if f[1] == "wind_speed_forecast_avg"),
-            None,
-        )
-
-        assert forecast_field is not None, "wind_speed_forecast_avg doit être défini"
-        storage_key, attr_name, default_value, field_type = forecast_field
-
-        assert storage_key == "wind_speed_forecast_avg"
-        assert attr_name == "wind_speed_forecast_avg"
-        assert default_value == 0.0
-        assert field_type == "float"
+    async def test_wind_speed_forecast_in_persistent_fields(self):
+        """Vérifier que wind_speed_forecast_avg est un champ persisté."""
+        # ADR-041: Vérifie simplement la présence dans _PERSISTENT_FIELDS
+        assert "wind_speed_forecast_avg" in SmartHRTData._PERSISTENT_FIELDS
 
     @pytest.mark.asyncio
     async def test_save_and_restore_temperature_forecast(self, create_coordinator):

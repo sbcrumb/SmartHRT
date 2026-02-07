@@ -1,0 +1,171 @@
+id: 037
+title: "Suppression du Polling Périodique d'Une Minute"
+status: "Accepté"
+date: "2026-02-07"
+context: |
+  Le coordinateur SmartHRT utilise actuellement trois mécanismes de mise à jour
+  qui se chevauchent :
+
+  1. **`async_track_time_interval(1 minute)`** : Appelle `_periodic_update` toutes 
+     les minutes pour mettre à jour les données météo et la moyenne de vent.
+
+  2. **`async_track_point_in_time`** : Triggers ponctuels pour `recovery_start_hour`,
+     `recovery_update_hour`, `recoverycalc_hour`, `target_hour`.
+
+  3. **`async_track_state_change_event`** : Réagit aux changements du capteur de
+     température intérieure.
+
+  **Code actuel (lignes 664-672) :**
+
+  ```python
+  def _setup_listeners(self) -> None:
+      # Listener pour les changements de température
+      self._unsub_listeners.append(
+          async_track_state_change_event(
+              self.hass, sensors, self._on_sensor_state_change
+          )
+      )
+      
+      # Polling toutes les minutes (PROBLÈME)
+      self._unsub_listeners.append(
+          async_track_time_interval(
+              self.hass, self._periodic_update, timedelta(minutes=1)
+          )
+      )
+      
+      # Polling horaire pour les prévisions
+      self._unsub_listeners.append(
+          async_track_time_interval(
+              self.hass, self._hourly_forecast_update, timedelta(hours=1)
+          )
+      )
+  ```
+
+  **Problèmes identifiés :**
+
+  1. **Redondance** : Le polling minute ne fait que mettre à jour les données 
+     météo, qui changent rarement (rafraîchies par l'intégration météo toutes 
+     les 10-30 minutes selon le service).
+
+  2. **Gaspillage de ressources** : 1440 appels/jour pour lire des données qui
+     n'ont pas changé dans >90% des cas.
+
+  3. **Confusion architecturale** : L'intégration est censée être "push" 
+     (pilotée par événements) mais conserve un polling hérité.
+
+  4. **Calculs déjà gérés** : Les recalculs de `recovery_time` sont pilotés par
+     `recovery_update_hour` avec une fréquence dynamique adaptée (ADR-025).
+
+  **Ce que fait `_periodic_update` actuellement :**
+
+  ```python
+  @callback
+  def _periodic_update(self, _now) -> None:
+      self._update_weather_data()       # Lit l'état de l'entité météo
+      self._update_wind_speed_average() # Calcule la moyenne glissante
+      self.async_set_updated_data(self.data)
+  ```
+
+decision: |
+  Supprimer le polling d'une minute et s'appuyer uniquement sur :
+  - Les triggers `async_track_point_in_time` pour les calculs horaires
+  - Les listeners `async_track_state_change_event` pour les changements de température
+  - Un listener additionnel sur l'entité météo pour les changements météo
+
+  **1. Ajouter un listener sur l'entité météo :**
+
+  ```python
+  def _setup_listeners(self) -> None:
+      sensors = [s for s in [self._interior_temp_sensor_id] if s]
+      
+      # Listener température intérieure
+      if sensors:
+          self._unsub_listeners.append(
+              async_track_state_change_event(
+                  self.hass, sensors, self._on_sensor_state_change
+              )
+          )
+      
+      # Listener entité météo (NOUVEAU)
+      if self._weather_entity_id:
+          self._unsub_listeners.append(
+              async_track_state_change_event(
+                  self.hass, [self._weather_entity_id], self._on_weather_state_change
+              )
+          )
+      
+      # SUPPRIMÉ: async_track_time_interval pour _periodic_update
+      
+      # Conserver: mise à jour horaire des prévisions
+      self._unsub_listeners.append(
+          async_track_time_interval(
+              self.hass, self._hourly_forecast_update, timedelta(hours=1)
+          )
+      )
+  ```
+
+  **2. Créer le callback météo :**
+
+  ```python
+  @callback
+  def _on_weather_state_change(self, event) -> None:
+      """Callback lors d'un changement d'état de l'entité météo."""
+      new_state = event.data.get("new_state")
+      if not new_state or new_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+          return
+      
+      self._update_weather_data()
+      self._update_wind_speed_average()
+      self.async_set_updated_data(self.data)
+  ```
+
+  **3. Supprimer `_periodic_update` :**
+
+  La méthode `_periodic_update` peut être supprimée entièrement car :
+  - `_update_weather_data()` est appelé via `_on_weather_state_change`
+  - `_update_wind_speed_average()` est appelé au même moment
+  - Les calculs de `recovery_time` sont gérés par `recovery_update_hour`
+
+  **4. Maintenir l'historique du vent :**
+
+  L'historique du vent (deque de 240 éléments pour 4h) sera alimenté uniquement
+  lors des changements d'état de l'entité météo. Si l'intégration météo rafraîchit
+  toutes les 10-15 minutes, on aura ~24-48 points sur 4h au lieu de 240.
+
+  **Alternative pour l'historique du vent :**
+
+  ```python
+  # Option A: Accepter moins de granularité (recommandé)
+  # L'historique sera moins dense mais suffisant pour la moyenne
+  wind_speed_history: deque = field(default_factory=lambda: deque(maxlen=50))
+
+  # Option B: Conserver un polling lent (15 min) juste pour l'historique
+  self._unsub_listeners.append(
+      async_track_time_interval(
+          self.hass, self._update_wind_history, timedelta(minutes=15)
+      )
+  )
+  ```
+
+consequences:
+  positive:
+    - Réduction de 1440 à ~100 appels/jour (selon fréquence météo)
+    - Architecture "push" cohérente et compréhensible
+    - Réactivité immédiate aux changements météo réels
+    - Charge CPU réduite sur Home Assistant
+    - Meilleure testabilité (moins de timers actifs)
+  negative:
+    - Historique du vent moins granulaire (24-48 points au lieu de 240/4h)
+    - Dépendance à la fréquence de l'intégration météo
+  risks:
+    - Si l'intégration météo ne met pas à jour régulièrement, les données
+      pourraient être stales (mitigé par le polling horaire des prévisions)
+    - La moyenne glissante du vent sera calculée sur moins de points
+
+implementation_notes: |
+  - Le polling horaire des prévisions (`_hourly_forecast_update`) est CONSERVÉ
+    car il appelle un service actif (`weather.get_forecasts`)
+  - Tester avec différentes intégrations météo (OpenWeatherMap, Met.no, etc.)
+    pour vérifier la fréquence de mise à jour
+  - Le `maxlen=240` de `wind_speed_history` peut être réduit à `maxlen=50`
+  - Si l'historique granulaire est nécessaire, un polling de 5-15 min est acceptable

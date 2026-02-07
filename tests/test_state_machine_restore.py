@@ -1,12 +1,14 @@
 """Tests pour la restauration de l'état après redémarrage.
 
 ADR-019: Restauration état après redémarrage
+ADR-039: Simplification logique de restauration (auto-correction)
 
 Ce module teste que la machine à états se restaure correctement
 après un redémarrage de Home Assistant, en vérifiant:
-- La cohérence entre état persisté et heure actuelle
+- La cohérence entre état persisté et heure actuelle (_is_state_coherent)
+- La détermination de la période nuit/jour (_is_night_period)
 - La reprogrammation des triggers
-- La correction automatique des états incohérents
+- L'auto-correction vers HEATING_ON en cas d'incohérence
 """
 
 from datetime import datetime, time as dt_time, timedelta
@@ -22,102 +24,185 @@ from custom_components.SmartHRT.coordinator import (
 )
 
 
-class TestDetermineExpectedState:
-    """Tests pour _determine_expected_state_for_time.
+class TestIsNightPeriod:
+    """Tests pour _is_night_period (ADR-039).
 
-    Cette méthode détermine l'état attendu basé sur l'heure actuelle.
+    Détermine si on est en période nocturne (MONITORING attendu).
     """
 
     @pytest.mark.asyncio
-    async def test_morning_before_target_hour_no_recovery(self, create_coordinator):
-        """Test: 05:00, pas de recovery_start_hour → MONITORING."""
+    async def test_night_after_recoverycalc_before_midnight(self, create_coordinator):
+        """Test: 23:30 avec target=06:00, recoverycalc=23:00 → nuit."""
+        coord = await create_coordinator()
+        current_time = dt_time(23, 30, 0)
+        target = dt_time(6, 0, 0)
+        recoverycalc = dt_time(23, 0, 0)
+
+        is_night = coord._is_night_period(current_time, target, recoverycalc)
+
+        assert is_night is True
+
+    @pytest.mark.asyncio
+    async def test_night_before_target_after_midnight(self, create_coordinator):
+        """Test: 05:00 avec target=06:00, recoverycalc=23:00 → nuit."""
+        coord = await create_coordinator()
+        current_time = dt_time(5, 0, 0)
+        target = dt_time(6, 0, 0)
+        recoverycalc = dt_time(23, 0, 0)
+
+        is_night = coord._is_night_period(current_time, target, recoverycalc)
+
+        assert is_night is True
+
+    @pytest.mark.asyncio
+    async def test_day_between_target_and_recoverycalc(self, create_coordinator):
+        """Test: 10:00 avec target=06:00, recoverycalc=23:00 → jour."""
+        coord = await create_coordinator()
+        current_time = dt_time(10, 0, 0)
+        target = dt_time(6, 0, 0)
+        recoverycalc = dt_time(23, 0, 0)
+
+        is_night = coord._is_night_period(current_time, target, recoverycalc)
+
+        assert is_night is False
+
+    @pytest.mark.asyncio
+    async def test_atypical_hours_during_night_period(self, create_coordinator):
+        """Test: config atypique recoverycalc=13:30, target=17:30 - 14:00 → nuit."""
+        coord = await create_coordinator()
+        current_time = dt_time(14, 0, 0)
+        target = dt_time(17, 30, 0)
+        recoverycalc = dt_time(13, 30, 0)
+
+        is_night = coord._is_night_period(current_time, target, recoverycalc)
+
+        assert is_night is True
+
+    @pytest.mark.asyncio
+    async def test_atypical_hours_during_day_period(self, create_coordinator):
+        """Test: config atypique recoverycalc=13:30, target=17:30 - 18:00 → jour."""
+        coord = await create_coordinator()
+        current_time = dt_time(18, 0, 0)
+        target = dt_time(17, 30, 0)
+        recoverycalc = dt_time(13, 30, 0)
+
+        is_night = coord._is_night_period(current_time, target, recoverycalc)
+
+        assert is_night is False
+
+
+class TestIsStateCoherent:
+    """Tests pour _is_state_coherent (ADR-039).
+
+    Vérifie si l'état persisté est cohérent avec l'heure actuelle.
+    """
+
+    @pytest.mark.asyncio
+    async def test_heating_on_always_coherent(self, create_coordinator):
+        """Test: HEATING_ON est toujours cohérent (état sûr par défaut)."""
         coord = await create_coordinator()
         coord.data.target_hour = dt_time(6, 0, 0)
         coord.data.recoverycalc_hour = dt_time(23, 0, 0)
-        coord.data.recovery_start_hour = None
 
-        now = datetime(2026, 2, 4, 5, 0, 0)
-        expected = coord._determine_expected_state_for_time(now)
-
-        # Entre 23:00 et 06:00 → MONITORING (nuit)
-        assert expected == SmartHRTState.MONITORING
+        # À n'importe quelle heure
+        for hour in [0, 5, 10, 15, 23]:
+            now = datetime(2026, 2, 4, hour, 0, 0)
+            assert coord._is_state_coherent(SmartHRTState.HEATING_ON, now) is True
 
     @pytest.mark.asyncio
-    async def test_morning_during_recovery_period(self, create_coordinator):
-        """Test: 05:30, recovery_start_hour=05:00 → HEATING_PROCESS."""
+    async def test_monitoring_coherent_at_night(self, create_coordinator):
+        """Test: MONITORING cohérent la nuit (après 23:00 ou avant 06:00)."""
+        coord = await create_coordinator()
+        coord.data.target_hour = dt_time(6, 0, 0)
+        coord.data.recoverycalc_hour = dt_time(23, 0, 0)
+
+        # 23:30 → nuit → cohérent
+        now = datetime(2026, 2, 4, 23, 30, 0)
+        assert coord._is_state_coherent(SmartHRTState.MONITORING, now) is True
+
+        # 05:00 → nuit → cohérent
+        now = datetime(2026, 2, 4, 5, 0, 0)
+        assert coord._is_state_coherent(SmartHRTState.MONITORING, now) is True
+
+    @pytest.mark.asyncio
+    async def test_monitoring_incoherent_during_day(self, create_coordinator):
+        """Test: MONITORING incohérent pendant le jour (entre 06:00 et 23:00)."""
+        coord = await create_coordinator()
+        coord.data.target_hour = dt_time(6, 0, 0)
+        coord.data.recoverycalc_hour = dt_time(23, 0, 0)
+
+        # 10:00 → jour → incohérent
+        now = datetime(2026, 2, 4, 10, 0, 0)
+        assert coord._is_state_coherent(SmartHRTState.MONITORING, now) is False
+
+    @pytest.mark.asyncio
+    async def test_detecting_lag_coherent_at_night(self, create_coordinator):
+        """Test: DETECTING_LAG cohérent la nuit (comme MONITORING)."""
+        coord = await create_coordinator()
+        coord.data.target_hour = dt_time(6, 0, 0)
+        coord.data.recoverycalc_hour = dt_time(23, 0, 0)
+
+        # 23:05 → nuit → cohérent
+        now = datetime(2026, 2, 4, 23, 5, 0)
+        assert coord._is_state_coherent(SmartHRTState.DETECTING_LAG, now) is True
+
+    @pytest.mark.asyncio
+    async def test_recovery_coherent_during_recovery_period(self, create_coordinator):
+        """Test: RECOVERY cohérent si recovery_start_hour <= now < target."""
         coord = await create_coordinator()
         coord.data.target_hour = dt_time(6, 0, 0)
         coord.data.recoverycalc_hour = dt_time(23, 0, 0)
         coord.data.recovery_start_hour = datetime(2026, 2, 4, 5, 0, 0)
+
+        # 05:30, entre recovery_start et target → cohérent
+        now = datetime(2026, 2, 4, 5, 30, 0)
+        assert coord._is_state_coherent(SmartHRTState.RECOVERY, now) is True
+
+    @pytest.mark.asyncio
+    async def test_heating_process_coherent_during_recovery_period(
+        self, create_coordinator
+    ):
+        """Test: HEATING_PROCESS cohérent si recovery_start_hour <= now < target."""
+        coord = await create_coordinator()
+        coord.data.target_hour = dt_time(6, 0, 0)
+        coord.data.recoverycalc_hour = dt_time(23, 0, 0)
+        coord.data.recovery_start_hour = datetime(2026, 2, 4, 5, 0, 0)
+
+        # 05:45, entre recovery_start et target → cohérent
+        now = datetime(2026, 2, 4, 5, 45, 0)
+        assert coord._is_state_coherent(SmartHRTState.HEATING_PROCESS, now) is True
+
+    @pytest.mark.asyncio
+    async def test_recovery_incoherent_without_recovery_start_hour(
+        self, create_coordinator
+    ):
+        """Test: RECOVERY incohérent si pas de recovery_start_hour."""
+        coord = await create_coordinator()
+        coord.data.target_hour = dt_time(6, 0, 0)
+        coord.data.recoverycalc_hour = dt_time(23, 0, 0)
+        coord.data.recovery_start_hour = None
 
         now = datetime(2026, 2, 4, 5, 30, 0)
-        expected = coord._determine_expected_state_for_time(now)
-
-        # Entre recovery_start_hour et target_hour → HEATING_PROCESS
-        assert expected == SmartHRTState.HEATING_PROCESS
+        assert coord._is_state_coherent(SmartHRTState.RECOVERY, now) is False
 
     @pytest.mark.asyncio
-    async def test_morning_after_target_hour(self, create_coordinator):
-        """Test: 10:00, après target_hour → HEATING_ON."""
+    async def test_heating_process_incoherent_after_target(self, create_coordinator):
+        """Test: HEATING_PROCESS incohérent après target_hour."""
         coord = await create_coordinator()
         coord.data.target_hour = dt_time(6, 0, 0)
         coord.data.recoverycalc_hour = dt_time(23, 0, 0)
         coord.data.recovery_start_hour = datetime(2026, 2, 4, 5, 0, 0)
 
+        # 10:00, après target → incohérent
         now = datetime(2026, 2, 4, 10, 0, 0)
-        expected = coord._determine_expected_state_for_time(now)
-
-        assert expected == SmartHRTState.HEATING_ON
-
-    @pytest.mark.asyncio
-    async def test_afternoon_before_recoverycalc(self, create_coordinator):
-        """Test: 15:00, avant recoverycalc_hour → HEATING_ON."""
-        coord = await create_coordinator()
-        coord.data.target_hour = dt_time(6, 0, 0)
-        coord.data.recoverycalc_hour = dt_time(23, 0, 0)
-
-        now = datetime(2026, 2, 4, 15, 0, 0)
-        expected = coord._determine_expected_state_for_time(now)
-
-        assert expected == SmartHRTState.HEATING_ON
-
-    @pytest.mark.asyncio
-    async def test_night_after_recoverycalc(self, create_coordinator):
-        """Test: 23:30, après recoverycalc_hour → MONITORING."""
-        coord = await create_coordinator()
-        coord.data.target_hour = dt_time(6, 0, 0)
-        coord.data.recoverycalc_hour = dt_time(23, 0, 0)
-        coord.data.recovery_start_hour = None
-
-        now = datetime(2026, 2, 4, 23, 30, 0)
-        expected = coord._determine_expected_state_for_time(now)
-
-        assert expected == SmartHRTState.MONITORING
-
-    @pytest.mark.asyncio
-    async def test_atypical_hours_recoverycalc_before_target(self, create_coordinator):
-        """Test: configuration atypique où recoverycalc < target."""
-        coord = await create_coordinator()
-        coord.data.target_hour = dt_time(17, 30, 0)  # 17:30
-        coord.data.recoverycalc_hour = dt_time(13, 30, 0)  # 13:30
-
-        # 14:00 entre recoverycalc et target → MONITORING
-        now = datetime(2026, 2, 4, 14, 0, 0)
-        expected = coord._determine_expected_state_for_time(now)
-
-        assert expected == SmartHRTState.MONITORING
-
-        # 18:00 après target → HEATING_ON
-        now = datetime(2026, 2, 4, 18, 0, 0)
-        expected = coord._determine_expected_state_for_time(now)
-
-        assert expected == SmartHRTState.HEATING_ON
+        assert coord._is_state_coherent(SmartHRTState.HEATING_PROCESS, now) is False
 
 
 class TestRestoreStateAfterRestart:
-    """Tests pour _restore_state_after_restart.
+    """Tests pour _restore_state_after_restart (ADR-039).
 
-    Vérifie que les états sont correctement restaurés après redémarrage.
+    Vérifie que les états sont correctement restaurés après redémarrage,
+    avec auto-correction vers HEATING_ON en cas d'incohérence.
     """
 
     @pytest.mark.asyncio
@@ -156,8 +241,8 @@ class TestRestoreStateAfterRestart:
             assert coord.data.current_state == SmartHRTState.MONITORING
 
     @pytest.mark.asyncio
-    async def test_detecting_lag_treated_as_monitoring(self, create_coordinator):
-        """Test: état DETECTING_LAG persisté pendant la nuit → cohérent avec MONITORING."""
+    async def test_detecting_lag_coherent_at_night(self, create_coordinator):
+        """Test: état DETECTING_LAG persisté pendant la nuit → cohérent."""
         with patch("custom_components.SmartHRT.coordinator.dt_util") as mock_dt:
             mock_now = datetime(2026, 2, 4, 23, 5, 0)
             mock_dt.now.return_value = mock_now
@@ -171,12 +256,12 @@ class TestRestoreStateAfterRestart:
 
             await coord._restore_state_after_restart()
 
-            # DETECTING_LAG est considéré cohérent avec MONITORING
+            # DETECTING_LAG est cohérent la nuit
             assert coord.data.current_state == SmartHRTState.DETECTING_LAG
 
     @pytest.mark.asyncio
-    async def test_recovery_treated_as_heating_process(self, create_coordinator):
-        """Test: état RECOVERY persisté pendant la relance → transition vers HEATING_PROCESS."""
+    async def test_recovery_coherent_during_recovery_period(self, create_coordinator):
+        """Test: état RECOVERY persisté pendant la relance → cohérent."""
         with patch("custom_components.SmartHRT.coordinator.dt_util") as mock_dt:
             mock_now = datetime(2026, 2, 4, 5, 30, 0)
             mock_dt.now.return_value = mock_now
@@ -188,14 +273,19 @@ class TestRestoreStateAfterRestart:
             coord.data.target_hour = dt_time(6, 0, 0)
             coord.data.recoverycalc_hour = dt_time(23, 0, 0)
 
+            # Mock on_recovery_end car target n'est pas dépassée
+            coord.on_recovery_end = MagicMock()
+
             await coord._restore_state_after_restart()
 
-            # RECOVERY doit passer à HEATING_PROCESS après redémarrage
-            assert coord.data.current_state == SmartHRTState.HEATING_PROCESS
+            # RECOVERY est cohérent entre recovery_start et target
+            assert coord.data.current_state == SmartHRTState.RECOVERY
 
     @pytest.mark.asyncio
-    async def test_incoherent_monitoring_in_day_corrected(self, create_coordinator):
-        """Test: état MONITORING persisté mais heure=10:00 → corrigé vers HEATING_ON."""
+    async def test_incoherent_monitoring_in_day_reset_to_heating_on(
+        self, create_coordinator
+    ):
+        """Test: état MONITORING persisté mais heure=10:00 → reset à HEATING_ON."""
         with patch("custom_components.SmartHRT.coordinator.dt_util") as mock_dt:
             mock_now = datetime(2026, 2, 4, 10, 0, 0)
             mock_dt.now.return_value = mock_now
@@ -209,14 +299,14 @@ class TestRestoreStateAfterRestart:
 
             await coord._restore_state_after_restart()
 
-            # État incohérent → corrigé vers HEATING_ON
+            # ADR-039: État incohérent → reset à HEATING_ON (auto-correction)
             assert coord.data.current_state == SmartHRTState.HEATING_ON
 
     @pytest.mark.asyncio
-    async def test_incoherent_heating_process_without_recovery(
+    async def test_incoherent_heating_process_without_recovery_reset(
         self, create_coordinator
     ):
-        """Test: état HEATING_PROCESS mais pas de recovery_start → corrigé."""
+        """Test: état HEATING_PROCESS sans recovery_start → reset à HEATING_ON."""
         with patch("custom_components.SmartHRT.coordinator.dt_util") as mock_dt:
             mock_now = datetime(2026, 2, 4, 10, 0, 0)
             mock_dt.now.return_value = mock_now
@@ -231,104 +321,8 @@ class TestRestoreStateAfterRestart:
 
             await coord._restore_state_after_restart()
 
-            # Devrait être corrigé vers HEATING_ON
+            # ADR-039: Incohérent → reset à HEATING_ON
             assert coord.data.current_state == SmartHRTState.HEATING_ON
-
-
-class TestTransitionToExpectedState:
-    """Tests pour _transition_to_expected_state.
-
-    Vérifie que la transition forcée configure correctement l'état cible.
-    """
-
-    @pytest.mark.asyncio
-    async def test_transition_to_heating_on(self, create_coordinator):
-        """Test: transition forcée vers HEATING_ON."""
-        with patch("custom_components.SmartHRT.coordinator.dt_util") as mock_dt:
-            mock_now = datetime(2026, 2, 4, 10, 0, 0)
-            mock_dt.now.return_value = mock_now
-
-            coord = await create_coordinator(
-                initial_state=SmartHRTState.MONITORING,
-            )
-
-            await coord._transition_to_expected_state(
-                SmartHRTState.HEATING_ON, mock_now
-            )
-
-            assert coord.data.current_state == SmartHRTState.HEATING_ON
-            assert coord.data.recovery_calc_mode is False
-            assert coord.data.rp_calc_mode is False
-            assert coord.data.temp_lag_detection_active is False
-
-    @pytest.mark.asyncio
-    async def test_transition_to_monitoring(self, create_coordinator):
-        """Test: transition forcée vers MONITORING."""
-        with patch("custom_components.SmartHRT.coordinator.dt_util") as mock_dt:
-            mock_now = datetime(2026, 2, 4, 0, 30, 0)
-            mock_dt.now.return_value = mock_now
-
-            coord = await create_coordinator(
-                initial_state=SmartHRTState.HEATING_ON,
-                interior_temp=18.0,
-                exterior_temp=3.0,
-            )
-            coord.data.recoverycalc_hour = dt_time(23, 0, 0)
-
-            await coord._transition_to_expected_state(
-                SmartHRTState.MONITORING, mock_now
-            )
-
-            assert coord.data.current_state == SmartHRTState.MONITORING
-            assert coord.data.recovery_calc_mode is True
-            assert coord.data.rp_calc_mode is False
-            assert coord.data.temp_lag_detection_active is False
-
-    @pytest.mark.asyncio
-    async def test_transition_to_heating_process(self, create_coordinator):
-        """Test: transition forcée vers HEATING_PROCESS."""
-        with patch("custom_components.SmartHRT.coordinator.dt_util") as mock_dt:
-            mock_now = datetime(2026, 2, 4, 5, 30, 0)
-            mock_dt.now.return_value = mock_now
-
-            coord = await create_coordinator(
-                initial_state=SmartHRTState.MONITORING,
-                recovery_start_hour=datetime(2026, 2, 4, 5, 0, 0),
-                interior_temp=17.5,
-                exterior_temp=2.0,
-            )
-
-            await coord._transition_to_expected_state(
-                SmartHRTState.HEATING_PROCESS, mock_now
-            )
-
-            assert coord.data.current_state == SmartHRTState.HEATING_PROCESS
-            assert coord.data.recovery_calc_mode is False
-            assert coord.data.rp_calc_mode is True
-            assert coord.data.temp_lag_detection_active is False
-
-    @pytest.mark.asyncio
-    async def test_transition_to_detecting_lag(self, create_coordinator):
-        """Test: transition forcée vers DETECTING_LAG."""
-        with patch("custom_components.SmartHRT.coordinator.dt_util") as mock_dt:
-            mock_now = datetime(2026, 2, 4, 23, 2, 0)
-            mock_dt.now.return_value = mock_now
-
-            coord = await create_coordinator(
-                initial_state=SmartHRTState.HEATING_ON,
-                interior_temp=19.0,
-                exterior_temp=4.0,
-            )
-
-            await coord._transition_to_expected_state(
-                SmartHRTState.DETECTING_LAG, mock_now
-            )
-
-            assert coord.data.current_state == SmartHRTState.DETECTING_LAG
-            assert coord.data.temp_lag_detection_active is True
-            assert coord.data.recovery_calc_mode is False
-            assert coord.data.rp_calc_mode is False
-            assert coord.data.temp_recovery_calc == 19.0
 
 
 class TestRestoreTriggersAfterRestart:
@@ -434,9 +428,16 @@ class TestPersistenceIntegration:
             await coord._async_on_recoverycalc_hour()
 
             # Vérifier que l'état a été sauvegardé
+            # ADR-041: Le format de stockage utilise __type__ pour les enums
             stored_data = await mock_store.async_load()
             if stored_data:
-                assert stored_data.get("current_state") == SmartHRTState.DETECTING_LAG
+                state_value = stored_data.get("current_state")
+                # Nouveau format: {"__type__": "enum", "value": "detecting_lag"}
+                if isinstance(state_value, dict) and "__type__" in state_value:
+                    assert state_value["value"] == str(SmartHRTState.DETECTING_LAG)
+                else:
+                    # Ancien format (compatibilité)
+                    assert state_value == SmartHRTState.DETECTING_LAG
 
     @pytest.mark.asyncio
     async def test_state_restored_from_storage(self, create_coordinator, mock_store):

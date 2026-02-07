@@ -1,6 +1,6 @@
 id: 032
 title: "Validation renforcée dans le Config Flow"
-status: "Proposé"
+status: "Accepté"
 date: "2026-02-03"
 context: |
   Le coordinateur utilise `entry.options` via un listener pour supporter
