@@ -1,0 +1,144 @@
+id: 035
+title: "Immuabilité de l'État et Transitions Atomiques"
+status: "Accepté"
+date: "2026-02-07"
+context: |
+  L'objet `SmartHRTData` est muté directement à plusieurs endroits du code.
+  Si une erreur survient au milieu d'une méthode complexe (comme 
+  `_async_on_recoverycalc_hour`), l'objet `data` peut se retrouver dans un 
+  état hybride (certains timestamps mis à jour, mais pas l'état `current_state`).
+
+  **Exemple de mutation non-atomique :**
+
+  ```python
+  def on_recovery_start(self) -> None:
+      # Étape 1 : mutation de l'état
+      self.data.current_state = SmartHRTState.HEATING_PROCESS
+      self.data.recovery_calc_mode = False
+      
+      # Étape 2 : mutation des timestamps
+      self.data.time_recovery_start = dt_util.now()  # Si exception ici...
+      self.data.temp_recovery_start = self.data.interior_temp
+      
+      # Étape 3 : calcul (peut échouer)
+      self.calculate_rcth_at_recovery_start()  # ...l'état est incohérent
+  ```
+
+  **Conséquences observées :**
+  - La méthode `_restore_state_after_restart` doit reconstruire la cohérence 
+    a posteriori avec des blocs `if/elif` complexes
+  - Difficile de débugger car l'état peut être partiellement modifié
+  - Les tests doivent vérifier de nombreuses combinaisons d'états intermédiaires
+
+decision: |
+  1. **Rendre les transitions atomiques** : Un changement d'état ne doit être 
+     validé que si toutes les conditions de préparation (guards) sont remplies.
+
+  ```python
+  @dataclass(frozen=True)
+  class StateSnapshot:
+      """Snapshot immuable de l'état à un instant T."""
+      current_state: SmartHRTState
+      recovery_calc_mode: bool
+      rp_calc_mode: bool
+      time_recovery_start: datetime | None
+      temp_recovery_start: float | None
+      # ... autres champs
+
+  class SmartHRTStateMachine:
+      def transition_to(
+          self, 
+          new_state: SmartHRTState,
+          snapshot: StateSnapshot,
+      ) -> StateSnapshot | None:
+          """Retourne un nouveau snapshot ou None si transition invalide."""
+          if not self._is_valid_transition(snapshot.current_state, new_state):
+              return None
+          
+          # Créer un nouveau snapshot avec les modifications
+          return self._create_new_snapshot(snapshot, new_state)
+  ```
+
+  2. **Utiliser `replace()` des dataclasses** pour générer un nouvel état au 
+     lieu de muter l'existant :
+
+  ```python
+  from dataclasses import replace
+
+  def on_recovery_start(self, current_data: SmartHRTData) -> SmartHRTData:
+      """Retourne un nouvel objet data avec l'état mis à jour."""
+      now = dt_util.now()
+      
+      # Création atomique du nouvel état
+      new_data = replace(
+          current_data,
+          current_state=SmartHRTState.HEATING_PROCESS,
+          recovery_calc_mode=False,
+          rp_calc_mode=True,
+          time_recovery_start=now,
+          temp_recovery_start=current_data.interior_temp,
+          text_recovery_start=current_data.exterior_temp,
+      )
+      
+      return new_data  # Validé seulement après succès complet
+  ```
+
+  3. **Implémenter une validation stricte** : toute transition doit passer par 
+     un seul point d'entrée qui garantit la cohérence entre `current_state` 
+     et les drapeaux associés :
+
+  ```python
+  class SmartHRTStateMachine:
+      def apply_transition(
+          self,
+          current: SmartHRTData,
+          new_state: SmartHRTState,
+          **updates: Any,
+      ) -> SmartHRTData:
+          """Point d'entrée unique pour les transitions."""
+          # 1. Valider la transition
+          if not self._is_valid_transition(current.current_state, new_state):
+              raise InvalidTransitionError(current.current_state, new_state)
+          
+          # 2. Valider la cohérence des flags
+          flags = self._compute_flags_for_state(new_state)
+          
+          # 3. Créer atomiquement le nouvel état
+          return replace(
+              current,
+              current_state=new_state,
+              recovery_calc_mode=flags.recovery_calc_mode,
+              rp_calc_mode=flags.rp_calc_mode,
+              **updates,
+          )
+  ```
+
+consequences:
+  positive:
+    - Robustesse face aux redémarrages et aux erreurs d'exécution
+    - Facilite le débogage grâce à une trace claire des états immuables successifs
+    - Possibilité d'implémenter un historique d'états (undo/redo, audit)
+    - Simplifie la restauration après crash (pas d'état hybride possible)
+    - Thread-safety implicite (pas de race conditions sur les mutations)
+  negative:
+    - Overhead mémoire léger (création de nouveaux objets)
+    - Nécessite de repenser les mutations existantes
+  risks:
+    - Performance: la création d'objets à chaque transition doit être mesurée
+    - Migration: le code existant utilise des mutations directes partout
+
+implementation_notes: |
+  - Ajouter `frozen=True` progressivement aux dataclasses d'état
+  - Créer des méthodes `with_*` pour les modifications courantes :
+    ```python
+    def with_recovery_start(self, now: datetime) -> SmartHRTData:
+        return replace(self, time_recovery_start=now, ...)
+    ```
+  - Benchmark la création d'objets vs mutation pour valider la performance
+  - Les tests peuvent comparer facilement l'état avant/après
+
+related_adrs:
+  - "ADR-033: Découplage de la logique d'état"
+  - "ADR-034: Gestion centralisée des effets de bord"
+  - "ADR-019: Restauration état après redémarrage"
+  - "ADR-029: Validation données Pydantic (alternative avec modèles Pydantic)"

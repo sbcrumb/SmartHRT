@@ -72,6 +72,10 @@ class MockHass:
             self.loop = asyncio.get_running_loop()
         except RuntimeError:
             self.loop = asyncio.new_event_loop()
+        # ADR-027: Attribut requis par DataUpdateCoordinator pour la validation thread-safe
+        import threading
+
+        self.loop_thread_id = threading.get_ident()
 
     async def async_add_executor_job(self, func, *args, **kwargs):
         """Exécute une fonction de manière synchrone pour les tests."""
@@ -189,9 +193,21 @@ def mock_now():
 def create_coordinator(mock_hass, mock_entry, mock_store):
     """Factory fixture pour créer un coordinator configuré."""
 
+    # ADR-040: Flags calculés depuis current_state - mapping pour tests legacy
+    FLAG_TO_STATE = {
+        "recovery_calc_mode": SmartHRTState.MONITORING,
+        "rp_calc_mode": SmartHRTState.HEATING_PROCESS,
+        "temp_lag_detection_active": SmartHRTState.DETECTING_LAG,
+    }
+
     async def _create_coordinator(
         initial_state: str = SmartHRTState.HEATING_ON, **data_overrides
     ) -> SmartHRTCoordinator:
+        # Configurer le frame helper pour DataUpdateCoordinator (ADR-027)
+        from homeassistant.helpers import frame as frame_helper
+
+        frame_helper._hass.hass = mock_hass
+
         with (
             patch(
                 "custom_components.SmartHRT.coordinator.Store", return_value=mock_store
@@ -212,15 +228,28 @@ def create_coordinator(mock_hass, mock_entry, mock_store):
             coordinator = SmartHRTCoordinator(mock_hass, mock_entry)
             coordinator._store = mock_store
 
+            # ADR-040: Si un flag est dans data_overrides avec True, ajuster initial_state
+            for flag_name, target_state in FLAG_TO_STATE.items():
+                if data_overrides.get(flag_name) is True:
+                    initial_state = target_state
+                    break
+
             # Configurer les données initiales
             coordinator.data.current_state = initial_state
+            coordinator._state_machine.force_state(initial_state, run_callbacks=False)
             coordinator.data.interior_temp = 18.5
             coordinator.data.exterior_temp = 5.0
             coordinator.data.wind_speed = 4.0
 
-            # Appliquer les overrides
+            # Appliquer les overrides (sauf flags - ADR-040: calculés depuis state)
+            computed_flags = {
+                "recovery_calc_mode",
+                "rp_calc_mode",
+                "temp_lag_detection_active",
+            }
             for key, value in data_overrides.items():
-                setattr(coordinator.data, key, value)
+                if key not in computed_flags:
+                    setattr(coordinator.data, key, value)
 
             return coordinator
 

@@ -1,0 +1,132 @@
+id: 031
+title: "Optimisation algorithmique de la résolution thermique"
+status: "Accepté"
+date: "2026-02-03"
+context: |
+  Le calcul `calculate_recovery_time()` utilise actuellement une boucle itérative
+  fixe de 20 itérations (ADR-022) :
+
+  ```python
+  for _ in range(20):  # Nombre d'itérations fixe
+      # Calcul de la température à chaque pas
+      # Mise à jour de l'estimation
+  ```
+
+  Bien que cette approche soit mise dans un `executor_job` pour ne pas bloquer
+  l'event loop, elle présente des limitations :
+
+  1. **Nombre fixe d'itérations** : 20 peut être insuffisant ou excessif selon
+     les conditions (convergence plus ou moins rapide)
+
+  2. **Approche brute force** : l'itération simple peut être sous-optimale
+     comparée à des méthodes de résolution numérique établies
+
+  3. **Pas de critère de convergence** : l'algorithme ne s'arrête pas quand
+     la solution est suffisamment précise
+
+  De plus, la logique de scheduling de `recovery_update_hour` via 
+  `_schedule_recovery_update()` est complexe avec des re-programmations
+  constants qui peuvent être difficiles à suivre et débugger.
+
+decision: |
+  1. **Introduire un critère de convergence** (amélioration immédiate) :
+
+  ```python
+  CONVERGENCE_THRESHOLD = 0.01  # 36 secondes de précision
+  MAX_ITERATIONS = 50
+
+  def calculate_recovery_duration(self, state: ThermalState) -> float:
+      """Calcul avec convergence adaptative."""
+      prev_estimate = float('inf')
+      
+      for iteration in range(MAX_ITERATIONS):
+          current_estimate = self._compute_iteration(state, iteration)
+          
+          # Vérifier la convergence
+          if abs(current_estimate - prev_estimate) < CONVERGENCE_THRESHOLD:
+              _LOGGER.debug("Convergence atteinte en %d itérations", iteration + 1)
+              break
+          
+          prev_estimate = current_estimate
+      else:
+          _LOGGER.warning("Max itérations atteint sans convergence")
+      
+      return current_estimate
+  ```
+
+  2. **Évaluer des méthodes numériques plus efficaces** (amélioration future) :
+
+  Pour le problème de trouver l'heure de démarrage t₀ tel que T(t_target) = T_sp,
+  on peut reformuler comme recherche de racine : f(t₀) = T(t_target) - T_sp = 0
+
+  Méthodes candidates :
+  - **Bissection** : simple et robuste, convergence garantie si encadrement
+  - **Newton-Raphson** : convergence quadratique si dérivée disponible
+  - **Brent** : combine bissection et interpolation, très robuste
+
+  ```python
+  from scipy.optimize import brentq
+
+  def calculate_recovery_time_optimized(self, state: ThermalState) -> float:
+      """Résolution par méthode de Brent (optionnelle)."""
+      def error_func(t0_hours):
+          # Simuler la température à t_target si on démarre à t0
+          t_final = self._simulate_temperature(state, t0_hours)
+          return t_final - state.target_temp
+      
+      # Recherche entre 0 et 8 heures avant target
+      try:
+          t0_optimal = brentq(error_func, 0, 8, xtol=0.01)
+          return t0_optimal
+      except ValueError:
+          # Pas de racine dans l'intervalle
+          return 0.0
+  ```
+
+  3. **Simplifier le scheduling des mises à jour** :
+
+  Au lieu de re-programmer constamment `recovery_update_hour`, utiliser
+  un timer unique avec intervalle adaptatif :
+
+  ```python
+  def _calculate_next_update_delay(self) -> timedelta:
+      """Calcule le délai avant prochaine mise à jour selon ADR-025."""
+      if self.data.recovery_start_hour is None:
+          return timedelta(hours=1)
+      
+      time_to_recovery = (self.data.recovery_start_hour - dt_util.now()).total_seconds() / 3600
+      
+      if time_to_recovery > 4:
+          return timedelta(hours=1)
+      elif time_to_recovery > 1:
+          return timedelta(minutes=15)
+      else:
+          return timedelta(minutes=5)
+  ```
+
+consequences:
+  positive:
+    - Convergence plus rapide dans la majorité des cas
+    - Précision garantie par le critère de convergence
+    - Réduction du temps CPU quand convergence rapide
+    - Détection des cas pathologiques (non-convergence)
+    - Scheduling plus prévisible et débuggable
+  negative:
+    - Complexité légèrement accrue
+    - Dépendance optionnelle à scipy pour les méthodes avancées
+  risks:
+    - S'assurer que la méthode itérative actuelle fonctionne correctement
+      avant d'optimiser (ne pas optimiser prématurément)
+    - Scipy n'est peut-être pas disponible dans tous les environnements HA
+
+implementation_notes: |
+  - Commencer par ajouter le critère de convergence (pas de nouvelle dépendance)
+  - Logger le nombre d'itérations pour monitoring
+  - Les méthodes scipy sont optionnelles (fallback sur itération simple)
+  - Ajouter des tests unitaires avec différents scénarios thermiques
+  - Benchmark avant/après pour valider l'amélioration
+
+related_adrs:
+  - "ADR-022: Calcul itératif anticipation thermique (implémentation actuelle)"
+  - "ADR-025: Fréquence dynamique recalcul (intervalles de mise à jour)"
+  - "ADR-026: Extraction modèle thermique (implémentation dans ThermalSolver)"

@@ -1,0 +1,202 @@
+id: 040
+title: "Délégation Complète des Flags à la Machine à États"
+status: "Accepté"
+date: "2026-02-07"
+context: |
+  Bien que SmartHRT dispose d'une machine à états (`SmartHRTStateMachine`) et
+  d'une fonction `get_state_flags()` (ADR-028, ADR-033), le coordinateur continue
+  de manipuler manuellement les drapeaux booléens dans plusieurs méthodes.
+
+  **Drapeaux concernés :**
+  - `recovery_calc_mode` : Actif pendant MONITORING (calculs de refroidissement)
+  - `rp_calc_mode` : Actif pendant HEATING_PROCESS (calculs de relance)
+  - `temp_lag_detection_active` : Actif pendant DETECTING_LAG
+
+  **Code problématique (exemples) :**
+
+  ```python
+  # Dans _async_on_recoverycalc_hour (ligne 842)
+  if not self.transition_to(SmartHRTState.DETECTING_LAG):
+      self.force_state(SmartHRTState.DETECTING_LAG)
+  self.data.temp_lag_detection_active = True  # MANIPULATION MANUELLE
+
+  # Dans _on_temperature_decrease_detected (ligne 1498)
+  if not self.transition_to(SmartHRTState.MONITORING):
+      self.force_state(SmartHRTState.MONITORING)
+  self.data.recovery_calc_mode = True         # MANIPULATION MANUELLE
+  self.data.temp_lag_detection_active = False  # MANIPULATION MANUELLE
+
+  # Dans on_recovery_start (ligne 1738)
+  # ... transition vers RECOVERY puis HEATING_PROCESS
+  # Les flags sont censés être gérés par _apply_state_transition_with_actions
+  # mais le code vérifie manuellement et ajuste
+  ```
+
+  **La fonction get_state_flags existe mais n'est pas toujours utilisée :**
+
+  ```python
+  # core.py
+  def get_state_flags(state: SmartHRTState) -> dict[str, bool]:
+      flags = {
+          SmartHRTState.HEATING_ON: {"recovery_calc_mode": False, "rp_calc_mode": False, "temp_lag_detection_active": False},
+          SmartHRTState.DETECTING_LAG: {"recovery_calc_mode": False, "rp_calc_mode": False, "temp_lag_detection_active": True},
+          SmartHRTState.MONITORING: {"recovery_calc_mode": True, "rp_calc_mode": False, "temp_lag_detection_active": False},
+          SmartHRTState.RECOVERY: {"recovery_calc_mode": False, "rp_calc_mode": False, "temp_lag_detection_active": False},
+          SmartHRTState.HEATING_PROCESS: {"recovery_calc_mode": False, "rp_calc_mode": True, "temp_lag_detection_active": False},
+      }
+      return flags.get(state, {})
+  ```
+
+  **Problèmes identifiés :**
+
+  1. **Encapsulation violée** : La machine à états devrait être la seule source
+     de vérité pour les flags associés à chaque état.
+
+  2. **Risque de désynchronisation** : Si un développeur oublie de mettre à jour
+     un flag manuellement, l'état et les flags divergent.
+
+  3. **Duplication de logique** : `get_state_flags()` et les manipulations manuelles
+     définissent la même correspondance état→flags à deux endroits.
+
+  4. **Tests fragiles** : Les tests doivent vérifier à la fois l'état ET les flags
+     alors qu'ils devraient être couplés automatiquement.
+
+decision: |
+  Supprimer toute manipulation manuelle des flags et les intégrer entièrement
+  dans la machine à états via des callbacks `on_enter`.
+
+  **1. Enrichir SmartHRTStateMachine :**
+
+  ```python
+  class SmartHRTStateMachine:
+      def __init__(
+          self,
+          initial_state: SmartHRTState,
+          data_ref: SmartHRTData,  # NOUVEAU: référence aux données
+          transition_actions: dict | None = None,
+          logger: logging.Logger | None = None,
+          log_prefix: str = "",
+      ):
+          self._state = initial_state
+          self._data = data_ref  # Référence directe aux données
+          self._transition_actions = transition_actions or {}
+          # ... reste identique ...
+          
+          # Enregistrer les callbacks de flags pour tous les états
+          for state in SmartHRTState:
+              self.on_enter(state, self._apply_state_flags)
+      
+      def _apply_state_flags(
+          self, _old_state: SmartHRTState, new_state: SmartHRTState
+      ) -> None:
+          """Applique automatiquement les flags associés à l'état."""
+          flags = get_state_flags(new_state)
+          for flag_name, flag_value in flags.items():
+              setattr(self._data, flag_name, flag_value)
+  ```
+
+  **2. Alternative : Propriétés calculées (pas de stockage des flags) :**
+
+  ```python
+  @dataclass
+  class SmartHRTData:
+      current_state: SmartHRTState = SmartHRTState.HEATING_ON
+      # Les flags ne sont plus stockés, ils sont calculés
+      
+      @property
+      def recovery_calc_mode(self) -> bool:
+          return self.current_state == SmartHRTState.MONITORING
+      
+      @property
+      def rp_calc_mode(self) -> bool:
+          return self.current_state == SmartHRTState.HEATING_PROCESS
+      
+      @property
+      def temp_lag_detection_active(self) -> bool:
+          return self.current_state == SmartHRTState.DETECTING_LAG
+  ```
+
+  Cette approche est plus radicale mais élimine tout risque de désynchronisation.
+
+  **3. Simplification du coordinateur :**
+
+  Supprimer toutes les lignes de manipulation manuelle des flags :
+
+  ```python
+  # AVANT
+  def _on_temperature_decrease_detected(self) -> None:
+      if not self.transition_to(SmartHRTState.MONITORING):
+          self.force_state(SmartHRTState.MONITORING)
+      self.data.recovery_calc_mode = True          # À SUPPRIMER
+      self.data.temp_lag_detection_active = False  # À SUPPRIMER
+
+  # APRÈS
+  def _on_temperature_decrease_detected(self) -> None:
+      if not self.transition_to(SmartHRTState.MONITORING):
+          self.force_state(SmartHRTState.MONITORING)
+      # Les flags sont automatiquement mis à jour par la machine à états
+  ```
+
+  **4. Méthode force_state avec garantie de cohérence :**
+
+  ```python
+  def force_state(self, new_state: SmartHRTState) -> None:
+      """Force un changement d'état avec mise à jour atomique des flags."""
+      old_state = self._state_machine.state
+      if new_state == old_state:
+          return
+      
+      # ADR-035 + ADR-040: Mise à jour atomique avec flags cohérents
+      flags = get_state_flags(new_state)
+      self.data = replace(self.data, current_state=new_state, **flags)
+      self._state_machine.force_state(new_state, run_callbacks=False)
+      # Note: run_callbacks=False car on a déjà appliqué les flags via replace()
+  ```
+
+  **5. Persistance : ne pas persister les flags :**
+
+  ```python
+  # const.py - Retirer les flags de PERSISTED_FIELDS
+  PERSISTED_FIELDS = [
+      # ("recovery_calc_mode", "recovery_calc_mode", False, "bool"),  # SUPPRIMÉ
+      # ("rp_calc_mode", "rp_calc_mode", False, "bool"),              # SUPPRIMÉ
+      # ("temp_lag_detection_active", ..., False, "bool"),            # SUPPRIMÉ
+      ("current_state", "current_state", "heating_on", "state"),     # Seul l'état est persisté
+      # ...
+  ]
+  ```
+
+  À la restauration, les flags sont recalculés depuis l'état :
+
+  ```python
+  async def _restore_learned_data(self) -> None:
+      # ... restauration des données ...
+      
+      # Recalculer les flags depuis l'état restauré
+      flags = get_state_flags(self.data.current_state)
+      for flag_name, flag_value in flags.items():
+          setattr(self.data, flag_name, flag_value)
+  ```
+
+consequences:
+  positive:
+    - Impossible de désynchroniser état et flags
+    - Code du coordinateur simplifié (~20 lignes de moins)
+    - Tests plus robustes (vérifier l'état suffit)
+    - Persistance allégée (1 champ au lieu de 4)
+    - Principe "Single Source of Truth" respecté
+  negative:
+    - Refactoring de plusieurs méthodes du coordinateur
+    - La variante "propriétés calculées" peut impacter les performances
+      si les flags sont accédés très fréquemment
+  risks:
+    - S'assurer que force_state() applique bien les flags
+    - Les sensors qui exposent les flags doivent s'adapter
+    - Attention aux imports circulaires si get_state_flags est dans core.py
+
+implementation_notes: |
+  - Choisir entre la variante "callbacks" et "propriétés calculées"
+  - La variante "propriétés calculées" est plus élégante mais nécessite
+    de changer la dataclass en une classe avec properties
+  - La variante "callbacks" conserve la dataclass simple
+  - Tester exhaustivement que les sensors exposant les flags fonctionnent toujours

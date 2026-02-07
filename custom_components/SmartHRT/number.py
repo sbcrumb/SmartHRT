@@ -4,6 +4,7 @@ ADR implémentées dans ce module:
 - ADR-006: Apprentissage continu (SmartHRTRelaxationNumber pour le facteur)
 - ADR-007: Compensation météo (RCth/RPth LW/HW pour interpolation vent)
 - ADR-012: Exposition entités pour Lovelace (numbers comme entités HA)
+- ADR-027: Utilisation de CoordinatorEntity pour synchronisation automatique
 """
 
 import logging
@@ -14,6 +15,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.helpers.device_registry import DeviceInfo, DeviceEntryType
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
     DOMAIN,
@@ -57,14 +59,14 @@ async def async_setup_entry(
     async_add_entities(entities, True)
 
 
-class SmartHRTBaseNumber(NumberEntity):
-    """Classe de base pour les number SmartHRT"""
+class SmartHRTBaseNumber(CoordinatorEntity[SmartHRTCoordinator], NumberEntity):
+    """Classe de base pour les number SmartHRT (ADR-027: CoordinatorEntity)."""
 
     def __init__(
         self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
     ) -> None:
         """Initialisation de base"""
-        self._coordinator = coordinator
+        super().__init__(coordinator)
         self._config_entry = config_entry
         self._device_id = config_entry.entry_id
         self._device_name = config_entry.data.get(CONF_NAME, "SmartHRT")
@@ -80,21 +82,6 @@ class SmartHRTBaseNumber(NumberEntity):
             manufacturer=DEVICE_MANUFACTURER,
             model="Smart Heating Regulator",
         )
-
-    async def async_added_to_hass(self) -> None:
-        """Callback appelé lorsque l'entité est ajoutée à HA"""
-        await super().async_added_to_hass()
-        self._coordinator.register_listener(self._on_coordinator_update)
-
-    async def async_will_remove_from_hass(self) -> None:
-        """Callback appelé lorsque l'entité est retirée de HA"""
-        self._coordinator.unregister_listener(self._on_coordinator_update)
-        await super().async_will_remove_from_hass()
-
-    @callback
-    def _on_coordinator_update(self) -> None:
-        """Callback lors d'une mise à jour du coordinateur"""
-        self.async_write_ha_state()
 
 
 class SmartHRTSetPointNumber(SmartHRTBaseNumber):
@@ -114,7 +101,7 @@ class SmartHRTSetPointNumber(SmartHRTBaseNumber):
 
     @property
     def native_value(self) -> float:
-        return self._coordinator.data.tsp
+        return self.coordinator.data.tsp
 
     @property
     def icon(self) -> str | None:
@@ -123,7 +110,7 @@ class SmartHRTSetPointNumber(SmartHRTBaseNumber):
     async def async_set_native_value(self, value: float) -> None:
         """Mise à jour de la valeur de consigne"""
         _LOGGER.info("Set point changed to: %s", value)
-        self._coordinator.set_tsp(value)
+        self.coordinator.set_tsp(value)
 
 
 class SmartHRTRCthNumber(SmartHRTBaseNumber):
@@ -143,7 +130,7 @@ class SmartHRTRCthNumber(SmartHRTBaseNumber):
 
     @property
     def native_value(self) -> float:
-        return round(self._coordinator.data.rcth, 2)
+        return round(self.coordinator.data.rcth, 2)
 
     @property
     def icon(self) -> str | None:
@@ -151,7 +138,7 @@ class SmartHRTRCthNumber(SmartHRTBaseNumber):
 
     async def async_set_native_value(self, value: float) -> None:
         _LOGGER.info("RCth changed to: %s", value)
-        self._coordinator.set_rcth(value)
+        self.coordinator.set_rcth(value)
 
 
 class SmartHRTRPthNumber(SmartHRTBaseNumber):
@@ -171,7 +158,7 @@ class SmartHRTRPthNumber(SmartHRTBaseNumber):
 
     @property
     def native_value(self) -> float:
-        return round(self._coordinator.data.rpth, 2)
+        return round(self.coordinator.data.rpth, 2)
 
     @property
     def icon(self) -> str | None:
@@ -179,7 +166,7 @@ class SmartHRTRPthNumber(SmartHRTBaseNumber):
 
     async def async_set_native_value(self, value: float) -> None:
         _LOGGER.info("RPth changed to: %s", value)
-        self._coordinator.set_rpth(value)
+        self.coordinator.set_rpth(value)
 
 
 class SmartHRTRCthLWNumber(SmartHRTBaseNumber):
@@ -203,7 +190,7 @@ class SmartHRTRCthLWNumber(SmartHRTBaseNumber):
 
     @property
     def native_value(self) -> float:
-        return round(self._coordinator.data.rcth_lw, 2)
+        return round(self.coordinator.data.rcth_lw, 2)
 
     @property
     def icon(self) -> str | None:
@@ -211,7 +198,7 @@ class SmartHRTRCthLWNumber(SmartHRTBaseNumber):
 
     async def async_set_native_value(self, value: float) -> None:
         _LOGGER.info("RCth LW changed to: %s", value)
-        self._coordinator.set_rcth_lw(value)
+        self.coordinator.set_rcth_lw(value)
 
 
 class SmartHRTRCthHWNumber(SmartHRTBaseNumber):
@@ -231,7 +218,7 @@ class SmartHRTRCthHWNumber(SmartHRTBaseNumber):
 
     @property
     def native_value(self) -> float:
-        return round(self._coordinator.data.rcth_hw, 2)
+        return round(self.coordinator.data.rcth_hw, 2)
 
     @property
     def icon(self) -> str | None:
@@ -239,7 +226,7 @@ class SmartHRTRCthHWNumber(SmartHRTBaseNumber):
 
     async def async_set_native_value(self, value: float) -> None:
         _LOGGER.info("RCth HW changed to: %s", value)
-        self._coordinator.set_rcth_hw(value)
+        self.coordinator.set_rcth_hw(value)
 
 
 class SmartHRTRPthLWNumber(SmartHRTBaseNumber):
@@ -259,7 +246,7 @@ class SmartHRTRPthLWNumber(SmartHRTBaseNumber):
 
     @property
     def native_value(self) -> float:
-        return round(self._coordinator.data.rpth_lw, 2)
+        return round(self.coordinator.data.rpth_lw, 2)
 
     @property
     def icon(self) -> str | None:
@@ -267,7 +254,7 @@ class SmartHRTRPthLWNumber(SmartHRTBaseNumber):
 
     async def async_set_native_value(self, value: float) -> None:
         _LOGGER.info("RPth LW changed to: %s", value)
-        self._coordinator.set_rpth_lw(value)
+        self.coordinator.set_rpth_lw(value)
 
 
 class SmartHRTRPthHWNumber(SmartHRTBaseNumber):
@@ -287,7 +274,7 @@ class SmartHRTRPthHWNumber(SmartHRTBaseNumber):
 
     @property
     def native_value(self) -> float:
-        return round(self._coordinator.data.rpth_hw, 2)
+        return round(self.coordinator.data.rpth_hw, 2)
 
     @property
     def icon(self) -> str | None:
@@ -295,7 +282,7 @@ class SmartHRTRPthHWNumber(SmartHRTBaseNumber):
 
     async def async_set_native_value(self, value: float) -> None:
         _LOGGER.info("RPth HW changed to: %s", value)
-        self._coordinator.set_rpth_hw(value)
+        self.coordinator.set_rpth_hw(value)
 
 
 class SmartHRTRelaxationNumber(SmartHRTBaseNumber):
@@ -318,7 +305,7 @@ class SmartHRTRelaxationNumber(SmartHRTBaseNumber):
 
     @property
     def native_value(self) -> float:
-        return self._coordinator.data.relaxation_factor
+        return self.coordinator.data.relaxation_factor
 
     @property
     def icon(self) -> str | None:
@@ -326,4 +313,4 @@ class SmartHRTRelaxationNumber(SmartHRTBaseNumber):
 
     async def async_set_native_value(self, value: float) -> None:
         _LOGGER.info("Relaxation factor changed to: %s", value)
-        self._coordinator.set_relaxation_factor(value)
+        self.coordinator.set_relaxation_factor(value)

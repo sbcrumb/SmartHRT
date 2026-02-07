@@ -1,0 +1,138 @@
+id: 045
+title: "Validation Pydantic au Runtime pour la Configuration"
+status: "Accepté"
+date: "2026-02-07"
+context: |
+  Les modèles Pydantic (`ConfigFlowDataModel`, `PersistedDataModel`) sont 
+  utilisés pour la validation lors du config_flow et de la persistance (ADR-029).
+  Cependant, la mise à jour des options via l'UI (options flow) ne bénéficie 
+  pas systématiquement de cette même validation stricte.
+
+  **Flux actuel dans `__init__.py` :**
+
+  ```python
+  async def async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
+      """Appelé quand les options sont modifiées via l'UI."""
+      coordinator = hass.data[DOMAIN][entry.entry_id][DATA_COORDINATOR]
+      
+      # Mise à jour directe sans validation Pydantic !
+      coordinator.update_config(
+          target_hour=entry.options.get(CONF_TARGET_HOUR),
+          recoverycalc_hour=entry.options.get(CONF_RECOVERYCALC_HOUR),
+          tsp=entry.options.get(CONF_TSP),
+      )
+  ```
+
+  **Problèmes identifiés :**
+
+  1. **Incohérence temporelle :** L'utilisateur peut configurer `recoverycalc_hour` 
+     à 08:00 et `target_hour` à 06:00, ce qui est illogique (arrêt après l'objectif).
+
+  2. **Valeurs hors bornes :** Malgré les validations du config_flow, une 
+     modification manuelle du fichier `.storage` peut injecter des valeurs 
+     invalides.
+
+  3. **Double validation :** Le config_flow valide déjà les données, mais 
+     l'options_flow utilise un chemin différent qui pourrait contourner ces règles.
+
+decision: |
+  1. **Utiliser `ConfigFlowDataModel` dans le `update_listener`** pour valider 
+     les options avant de les appliquer :
+
+  ```python
+  from .models import ConfigFlowDataModel
+
+  async def async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
+      """Appelé quand les options sont modifiées via l'UI."""
+      coordinator = hass.data[DOMAIN][entry.entry_id][DATA_COORDINATOR]
+      
+      try:
+          # ADR-045: Validation Pydantic avant application
+          validated = ConfigFlowDataModel(
+              name=entry.data.get(CONF_NAME, "SmartHRT"),
+              target_hour=entry.options.get(CONF_TARGET_HOUR, "06:00:00"),
+              recoverycalc_hour=entry.options.get(CONF_RECOVERYCALC_HOUR, "23:00:00"),
+              tsp=entry.options.get(CONF_TSP, DEFAULT_TSP),
+              sensor_interior_temperature=entry.data.get(CONF_SENSOR_INTERIOR_TEMP),
+              weather_entity=entry.data.get(CONF_WEATHER_ENTITY),
+          )
+      except ValidationError as e:
+          _LOGGER.error("Configuration invalide: %s", e)
+          # Notifier l'utilisateur via persistent_notification
+          await hass.services.async_call(
+              "persistent_notification",
+              "create",
+              {
+                  "title": "SmartHRT - Configuration invalide",
+                  "message": f"Erreur de validation: {e}",
+                  "notification_id": "smarthrt_config_error",
+              },
+          )
+          return  # Ne pas appliquer la configuration invalide
+      
+      # Appliquer uniquement si la validation a réussi
+      coordinator.update_config(
+          target_hour=validated.target_hour_as_time,
+          recoverycalc_hour=validated.recoverycalc_hour_as_time,
+          tsp=validated.tsp,
+      )
+  ```
+
+  2. **Ajouter des validations croisées** dans `ConfigFlowDataModel` :
+
+  ```python
+  class ConfigFlowDataModel(BaseModel):
+      # ... champs existants ...
+      
+      @model_validator(mode="after")
+      def validate_time_coherence(self) -> "ConfigFlowDataModel":
+          """ADR-045: Valide la cohérence temporelle."""
+          target = self.target_hour_as_time
+          recovery = self.recoverycalc_hour_as_time
+          
+          # Si recoverycalc_hour est après minuit et target avant,
+          # c'est cohérent (ex: 23:00 → 06:00)
+          # Sinon, vérifier que recoverycalc < target
+          if recovery >= target and target > time(6, 0):
+              raise ValueError(
+                  f"recoverycalc_hour ({recovery}) doit être avant "
+                  f"target_hour ({target})"
+              )
+          return self
+  ```
+
+  3. **Centraliser la logique de validation** en utilisant les mêmes modèles 
+     dans :
+     - `config_flow.py` (création initiale)
+     - `__init__.py` (options flow)
+     - `coordinator.py` (restauration des données)
+
+consequences:
+  positive:
+    - "Élimination des crashs potentiels du coordinateur suite à une mauvaise saisie"
+    - "Validation cohérente sur tous les chemins d'entrée des données"
+    - "Messages d'erreur clairs pour l'utilisateur"
+    - "Impossible d'injecter des configurations incohérentes"
+  negative:
+    - "Légère surcharge CPU lors de chaque mise à jour d'options"
+    - "Notifications d'erreur peuvent surprendre l'utilisateur"
+
+implementation_notes: |
+  **Fichiers impactés :**
+  - `__init__.py` : Modification de `async_options_updated`
+  - `models.py` : Ajout des validations croisées
+  - `config_flow.py` : Utilisation des mêmes règles de validation
+
+  **Gestion des erreurs :**
+  - Utiliser `persistent_notification` pour informer l'utilisateur
+  - Logger l'erreur en niveau ERROR pour faciliter le diagnostic
+  - Ne jamais appliquer une configuration invalide
+
+  **Tests à ajouter :**
+  - Test avec `recoverycalc_hour` > `target_hour` (même jour)
+  - Test avec `tsp` hors des bornes [13, 26]
+  - Test de modification via l'UI avec données invalides
+
+related_adrs:
+  - "ADR-029: Validation des données avec Pydantic"
+  - "ADR-032: Validation config_flow avec contraintes"

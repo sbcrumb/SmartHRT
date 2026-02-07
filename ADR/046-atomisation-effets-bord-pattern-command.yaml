@@ -1,0 +1,195 @@
+id: 046
+title: "Atomisation des Effets de Bord via le Pattern Command"
+status: "Accepté"
+date: "2026-02-07"
+context: |
+  Bien que l'ADR-034 ait introduit le concept d'actions émises par la machine 
+  à états, l'implémentation actuelle laisse encore la responsabilité au 
+  développeur d'appeler manuellement les bonnes méthodes après chaque transition.
+
+  **Situation actuelle :**
+
+  ```python
+  def on_recovery_start(self) -> None:
+      # Transition avec actions
+      actions = self._apply_state_transition_with_actions(
+          SmartHRTState.RECOVERY,
+          updates=updates,
+      )
+      
+      # Le développeur doit manuellement traiter les actions
+      if actions:
+          self._execute_actions(actions)  # Facile à oublier !
+      
+      # Et parfois il y a du code spécifique en plus...
+      if not self.transition_to(SmartHRTState.HEATING_PROCESS):
+          self.force_state(SmartHRTState.HEATING_PROCESS)
+      
+      # Et encore plus de logique manuelle...
+      self.async_set_updated_data(self.data)
+  ```
+
+  **Problèmes identifiés :**
+
+  1. **Oubli d'actions :** Un développeur peut oublier d'appeler `_execute_actions` 
+     ou `_save_learned_data` après une transition.
+
+  2. **Ordre d'exécution incohérent :** Les actions peuvent être exécutées dans 
+     un ordre différent selon le contexte.
+
+  3. **Duplication :** Le même pattern `transition + execute_actions + save` 
+     est répété dans plusieurs méthodes.
+
+decision: |
+  1. **La machine à états doit retourner systématiquement une liste d'`Action`** 
+     lors d'une transition réussie, sans exception :
+
+  ```python
+  class SmartHRTStateMachine:
+      def transition_with_actions(
+          self, new_state: SmartHRTState
+      ) -> StateTransitionResult:
+          """Effectue une transition et retourne les actions associées."""
+          old_state = self._state
+          success = self.transition_to(new_state)
+          
+          actions: list[Action] = []
+          if success:
+              actions = self._get_actions_for_transition(old_state, new_state)
+          
+          return StateTransitionResult(
+              success=success,
+              old_state=old_state,
+              new_state=self._state,
+              actions=actions,
+          )
+  ```
+
+  2. **Définir les actions par transition de manière déclarative :**
+
+  ```python
+  TRANSITION_ACTIONS: dict[tuple[SmartHRTState, SmartHRTState], list[Action]] = {
+      # DETECTING_LAG → MONITORING
+      (SmartHRTState.DETECTING_LAG, SmartHRTState.MONITORING): [
+          Action.SCHEDULE_RECOVERY_UPDATE,
+          Action.SAVE_DATA,
+      ],
+      # MONITORING → RECOVERY
+      (SmartHRTState.MONITORING, SmartHRTState.RECOVERY): [
+          Action.SNAPSHOT_RECOVERY_START,
+          Action.CANCEL_RECOVERY_TIMER,
+          Action.CALCULATE_RCTH,
+          Action.SAVE_DATA,
+      ],
+      # RECOVERY → HEATING_PROCESS
+      (SmartHRTState.RECOVERY, SmartHRTState.HEATING_PROCESS): [
+          # Pas d'action supplémentaire, le snapshot est déjà fait
+      ],
+      # HEATING_PROCESS → HEATING_ON
+      (SmartHRTState.HEATING_PROCESS, SmartHRTState.HEATING_ON): [
+          Action.SNAPSHOT_RECOVERY_END,
+          Action.CALCULATE_RPTH,
+          Action.SAVE_DATA,
+      ],
+  }
+  ```
+
+  3. **Implémenter un exécuteur d'actions unique** dans le coordinateur :
+
+  ```python
+  class SmartHRTCoordinator:
+      def _execute_actions(self, actions: list[Action]) -> None:
+          """Exécute une liste d'actions de manière atomique.
+          
+          ADR-046: Point unique d'exécution des effets de bord.
+          """
+          for action in actions:
+              try:
+                  self._execute_single_action(action)
+              except Exception as e:
+                  _LOGGER.error(
+                      "%s Erreur lors de l'action %s: %s",
+                      self._log_prefix(), action.value, e
+                  )
+                  # Continuer avec les autres actions
+      
+      def _execute_single_action(self, action: Action) -> None:
+          """Exécute une action unique."""
+          match action:
+              case Action.SNAPSHOT_RECOVERY_START:
+                  self._snapshot_recovery_start()
+              case Action.SNAPSHOT_RECOVERY_END:
+                  self._snapshot_recovery_end()
+              case Action.CALCULATE_RCTH:
+                  self.calculate_rcth_at_recovery_start()
+              case Action.CALCULATE_RPTH:
+                  self.calculate_rpth_at_recovery_end()
+              case Action.SAVE_DATA:
+                  self.hass.async_create_task(self._save_learned_data())
+              case Action.SCHEDULE_RECOVERY_UPDATE:
+                  update_time = self.calculate_recovery_update_time()
+                  if update_time:
+                      self._schedule_recovery_update(update_time)
+              case Action.CANCEL_RECOVERY_TIMER:
+                  self._cancel_recovery_timer()
+  ```
+
+  4. **Simplifier les méthodes de haut niveau** :
+
+  ```python
+  def on_recovery_start(self) -> None:
+      """ADR-046: Version simplifiée avec exécution automatique des actions."""
+      result = self._state_machine.transition_with_actions(SmartHRTState.RECOVERY)
+      
+      if result.success:
+          self._execute_actions(result.actions)
+      else:
+          # Forcer si nécessaire (restauration, etc.)
+          self.force_state(SmartHRTState.RECOVERY)
+          self._execute_actions([Action.CALCULATE_RCTH, Action.SAVE_DATA])
+      
+      # Transition immédiate vers HEATING_PROCESS
+      result2 = self._state_machine.transition_with_actions(SmartHRTState.HEATING_PROCESS)
+      if result2.success:
+          self._execute_actions(result2.actions)
+      
+      self.async_set_updated_data(self.data)
+  ```
+
+consequences:
+  positive:
+    - "Garantie que chaque changement d'état est suivi de ses actions associées"
+    - "Impossible d'oublier une sauvegarde ou un calcul"
+    - "Code déclaratif et lisible (mapping transition → actions)"
+    - "Point unique de modification pour ajouter/supprimer des actions"
+    - "Facilite les tests unitaires (on peut vérifier les actions émises)"
+  negative:
+    - "Moins de flexibilité pour des cas particuliers"
+    - "Le mapping doit être maintenu à jour lors de l'ajout d'états"
+
+implementation_notes: |
+  **Fichiers impactés :**
+  - `core/state_machine.py` : Définition de `TRANSITION_ACTIONS`
+  - `core/types.py` : S'assurer que `Action` couvre tous les cas
+  - `coordinator.py` : Implémentation de `_execute_actions` et `_execute_single_action`
+
+  **Ordre d'exécution recommandé :**
+  1. Snapshots (capture des données avant calcul)
+  2. Annulation des timers
+  3. Calculs (RCth, RPth)
+  4. Planification des nouveaux timers
+  5. Sauvegarde (toujours en dernier)
+
+  **Gestion des erreurs :**
+  - Logger l'erreur mais continuer avec les autres actions
+  - Ne jamais laisser le système dans un état partiellement mis à jour
+
+  **Tests à ajouter :**
+  - Vérifier que chaque transition émet les bonnes actions
+  - Vérifier l'ordre d'exécution des actions
+  - Tester le comportement en cas d'erreur dans une action
+
+related_adrs:
+  - "ADR-033: Découplage de la Logique d'État (Pattern State)"
+  - "ADR-034: Gestion Centralisée des Effets de Bord via Callbacks"
+  - "ADR-035: Immutabilité de l'état et transitions atomiques"

@@ -1,0 +1,219 @@
+id: 038
+title: "Séparation des Données de Configuration et d'État Dynamique"
+status: "Accepté"
+date: "2026-02-07"
+context: |
+  La dataclass `SmartHRTData` mélange actuellement trois types de données très 
+  différents dans une seule structure de ~50 champs :
+
+  **1. Configuration (statique, modifiable par l'utilisateur) :**
+  - `name`, `tsp`, `target_hour`, `recoverycalc_hour`
+  - `smartheating_mode`, `recovery_adaptive_mode`
+
+  **2. Coefficients appris (évoluent lentement) :**
+  - `rcth`, `rpth`, `rcth_lw`, `rcth_hw`, `rpth_lw`, `rpth_hw`
+  - `relaxation_factor`
+
+  **3. État dynamique (change fréquemment) :**
+  - `current_state`, `recovery_calc_mode`, `rp_calc_mode`, `temp_lag_detection_active`
+  - `interior_temp`, `exterior_temp`, `wind_speed`, `windchill`
+  - `time_recovery_*`, `temp_recovery_*`, `text_recovery_*`
+  - `recovery_start_hour`, `recovery_update_hour`
+
+  **4. Diagnostic (lecture seule) :**
+  - `rcth_fast`, `rcth_calculated`, `rpth_calculated`
+  - `last_rcth_error`, `last_rpth_error`, `stop_lag_duration`
+
+  **Problèmes identifiés :**
+
+  1. **Persistance complexe** : `PERSISTED_FIELDS` doit lister explicitement
+     quels champs persister parmi les 50+.
+  
+  2. **Snapshots lourds** : `dataclasses.replace()` copie tous les champs même
+     pour une modification mineure.
+  
+  3. **Testabilité réduite** : Créer un mock de `SmartHRTData` nécessite 
+     d'initialiser des dizaines de champs.
+  
+  4. **Couplage fort** : La configuration et l'état transitoire sont indissociables.
+
+  **Code actuel fragmenté :**
+
+  ```python
+  @dataclass
+  class SmartHRTData:
+      # 50+ champs mélangés
+      name: str = "SmartHRT"
+      tsp: float = DEFAULT_TSP
+      current_state: SmartHRTState = SmartHRTState.HEATING_ON
+      interior_temp: float | None = None
+      rcth: float = DEFAULT_RCTH
+      time_recovery_calc: datetime | None = None
+      # ... encore 40+ champs ...
+  ```
+
+decision: |
+  Séparer `SmartHRTData` en plusieurs dataclasses spécialisées, chacune avec
+  une responsabilité claire :
+
+  **1. SmartHRTConfig (configuration utilisateur) :**
+
+  ```python
+  @dataclass
+  class SmartHRTConfig:
+      """Configuration statique, modifiable via l'UI ou les services."""
+      name: str = "SmartHRT"
+      tsp: float = DEFAULT_TSP
+      target_hour: dt_time = field(default_factory=lambda: dt_time(6, 0, 0))
+      recoverycalc_hour: dt_time = field(default_factory=lambda: dt_time(23, 0, 0))
+      smartheating_mode: bool = True
+      recovery_adaptive_mode: bool = True
+  ```
+
+  **2. ThermalCoefficients (coefficients appris) :**
+
+  ```python
+  @dataclass
+  class ThermalCoefficients:
+      """Coefficients thermiques appris par le système."""
+      rcth: float = DEFAULT_RCTH
+      rpth: float = DEFAULT_RPTH
+      rcth_lw: float = DEFAULT_RCTH
+      rcth_hw: float = DEFAULT_RCTH
+      rpth_lw: float = DEFAULT_RPTH
+      rpth_hw: float = DEFAULT_RPTH
+      relaxation_factor: float = DEFAULT_RELAXATION_FACTOR
+  ```
+  
+  Note: Cette dataclass existe déjà dans `core.py` (ADR-026).
+
+  **3. SmartHRTState (état dynamique de la machine) :**
+
+  ```python
+  @dataclass
+  class SmartHRTStateData:
+      """État dynamique de la machine à états."""
+      current_state: SmartHRTState = SmartHRTState.HEATING_ON
+      recovery_calc_mode: bool = False
+      rp_calc_mode: bool = False
+      temp_lag_detection_active: bool = False
+      
+      # Snapshots de référence
+      time_recovery_calc: datetime | None = None
+      time_recovery_start: datetime | None = None
+      time_recovery_end: datetime | None = None
+      temp_recovery_calc: float = 17.0
+      temp_recovery_start: float = 17.0
+      temp_recovery_end: float = 17.0
+      text_recovery_calc: float = 0.0
+      text_recovery_start: float = 0.0
+      text_recovery_end: float = 0.0
+      
+      # Triggers programmés
+      recovery_start_hour: datetime | None = None
+      recovery_update_hour: datetime | None = None
+  ```
+
+  **4. WeatherData (données météo actuelles) :**
+
+  ```python
+  @dataclass
+  class WeatherData:
+      """Données météorologiques actuelles et prévisions."""
+      interior_temp: float | None = None
+      exterior_temp: float | None = None
+      wind_speed: float = 0.0  # m/s
+      windchill: float | None = None
+      wind_speed_avg: float = 0.0  # m/s
+      wind_speed_forecast_avg: float = 0.0  # km/h
+      temperature_forecast_avg: float = 0.0  # °C
+      wind_speed_history: deque = field(default_factory=lambda: deque(maxlen=240))
+  ```
+
+  **5. DiagnosticData (données calculées, lecture seule) :**
+
+  ```python
+  @dataclass
+  class DiagnosticData:
+      """Données de diagnostic et métriques calculées."""
+      rcth_fast: float = 0.0
+      rcth_calculated: float = 0.0
+      rpth_calculated: float = 0.0
+      last_rcth_error: float = 0.0
+      last_rpth_error: float = 0.0
+      stop_lag_duration: float = 0.0
+  ```
+
+  **6. SmartHRTData (composition) :**
+
+  ```python
+  @dataclass
+  class SmartHRTData:
+      """Données complètes du système SmartHRT (composition)."""
+      config: SmartHRTConfig = field(default_factory=SmartHRTConfig)
+      coefficients: ThermalCoefficients = field(default_factory=ThermalCoefficients)
+      state: SmartHRTStateData = field(default_factory=SmartHRTStateData)
+      weather: WeatherData = field(default_factory=WeatherData)
+      diagnostic: DiagnosticData = field(default_factory=DiagnosticData)
+  ```
+
+  **Simplification de la persistance :**
+
+  ```python
+  # Avant: 30+ tuples dans PERSISTED_FIELDS
+  # Après: Sérialisation par groupe
+
+  async def _save_learned_data(self) -> None:
+      data = {
+          "config": asdict(self.data.config),
+          "coefficients": asdict(self.data.coefficients),
+          "state": self._serialize_state(self.data.state),
+      }
+      await self._store.async_save(data)
+
+  async def _restore_learned_data(self) -> None:
+      stored = await self._store.async_load()
+      if stored:
+          if "config" in stored:
+              self.data.config = SmartHRTConfig(**stored["config"])
+          if "coefficients" in stored:
+              self.data.coefficients = ThermalCoefficients(**stored["coefficients"])
+          if "state" in stored:
+              self.data.state = self._deserialize_state(stored["state"])
+  ```
+
+  **Migration des accès :**
+
+  ```python
+  # Avant
+  self.data.tsp = 20.0
+  self.data.current_state = SmartHRTState.MONITORING
+  self.data.interior_temp = 18.5
+
+  # Après
+  self.data.config.tsp = 20.0
+  self.data.state.current_state = SmartHRTState.MONITORING
+  self.data.weather.interior_temp = 18.5
+  ```
+
+consequences:
+  positive:
+    - Responsabilités claires : config vs état vs météo vs diagnostic
+    - Persistance simplifiée par groupe logique
+    - Tests unitaires ciblés sur chaque composant
+    - `replace()` plus efficace (copie partielle)
+    - Réutilisation de `ThermalCoefficients` depuis `core.py`
+    - Snapshots sélectifs possibles (ex: sauver seulement les coefficients)
+  negative:
+    - Migration importante du code existant (`self.data.X` → `self.data.group.X`)
+    - Sensors et services doivent s'adapter à la nouvelle structure
+    - Complexité initiale lors de la transition
+  risks:
+    - Breaking change pour les tests existants
+    - Attention aux imports circulaires si les dataclasses sont dans des modules séparés
+
+implementation_notes: |
+  - Placer les dataclasses dans `models.py` ou directement dans `coordinator.py`
+  - Le groupe `WeatherData` n'est PAS persisté (données volatiles)
+  - Le groupe `DiagnosticData` n'est PAS persisté (calculé à la volée)
+  - Conserver une compatibilité temporaire via des properties de façade si nécessaire

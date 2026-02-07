@@ -4,10 +4,12 @@ ADR implémentées dans ce module:
 - ADR-002: Sélection explicite de l'entité météo (weather_entity selector)
 - ADR-010: Inputs dynamiques configurables (ConfigFlow multi-step)
 - ADR-011: Robustesse des calculs (validation des entrées)
+- ADR-032: Validation renforcée (existence entités, séquence horaires)
 """
 
 import logging
 from typing import Any
+from datetime import time as dt_time
 import copy
 from collections.abc import Mapping
 
@@ -116,6 +118,8 @@ class SmartHRTConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def async_step_sensors(self, user_input: dict | None = None) -> FlowResult:
         """Gestion de l'étape sensors. Configuration des capteurs et paramètres."""
+        errors: dict[str, str] = {}
+
         sensors_form = vol.Schema(
             {
                 # Heure cible (Wake Up Time)
@@ -158,10 +162,49 @@ class SmartHRTConfigFlow(ConfigFlow, domain=DOMAIN):
                 ),
             )  # pyright: ignore[reportReturnType]
 
-        # 2ème appel : il y a des user_input -> on stocke le résultat
+        # 2ème appel : il y a des user_input -> validation ADR-032
         _LOGGER.debug(
             "config_flow step sensors (2). On a reçu les valeurs: %s", user_input
         )
+
+        # ADR-032: Validation de l'entité météo
+        weather_entity_id = user_input.get(CONF_WEATHER_ENTITY)
+        if weather_entity_id:
+            weather_state = self.hass.states.get(weather_entity_id)
+            if weather_state is None:
+                errors[CONF_WEATHER_ENTITY] = "weather_not_found"
+            elif not self._is_valid_weather_entity(weather_state):
+                errors[CONF_WEATHER_ENTITY] = "weather_incompatible"
+
+        # ADR-032: Validation du capteur de température
+        temp_sensor_id = user_input.get(CONF_SENSOR_INTERIOR_TEMP)
+        if temp_sensor_id:
+            temp_state = self.hass.states.get(temp_sensor_id)
+            if temp_state is None:
+                errors[CONF_SENSOR_INTERIOR_TEMP] = "sensor_not_found"
+
+        # ADR-032: Validation TSP dans les limites
+        tsp = user_input.get(CONF_TSP, DEFAULT_TSP)
+        if not (DEFAULT_TSP_MIN <= tsp <= DEFAULT_TSP_MAX):
+            errors[CONF_TSP] = "tsp_out_of_range"
+
+        # ADR-032: Validation séquence horaires
+        target_hour = user_input.get(CONF_TARGET_HOUR)
+        recoverycalc_hour = user_input.get(CONF_RECOVERYCALC_HOUR)
+        if target_hour and recoverycalc_hour:
+            if not self._validate_time_sequence(recoverycalc_hour, target_hour):
+                errors["base"] = "invalid_time_sequence"
+
+        # Si erreurs, réafficher le formulaire
+        if errors:
+            _LOGGER.debug("Erreurs de validation config_flow: %s", errors)
+            return self.async_show_form(
+                step_id="sensors",
+                data_schema=add_suggested_values_to_schema(
+                    data_schema=sensors_form, suggested_values=user_input
+                ),
+                errors=errors,
+            )  # pyright: ignore[reportReturnType]
 
         # On mémorise les user_input
         self._user_inputs.update(user_input)
@@ -173,6 +216,54 @@ class SmartHRTConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_create_entry(
             title=self._user_inputs[CONF_NAME], data=self._user_inputs
         )  # pyright: ignore[reportReturnType]
+
+    def _is_valid_weather_entity(self, state) -> bool:
+        """Vérifie que l'entité météo est valide (ADR-032).
+
+        Une entité météo valide doit être du domaine 'weather' et
+        idéalement supporter les prévisions.
+        """
+        if state is None:
+            return False
+        # Le domaine est vérifié par le selector, mais on vérifie quand même
+        return state.domain == "weather"
+
+    def _validate_time_sequence(self, recoverycalc: str, target: str) -> bool:
+        """Vérifie que recoverycalc_hour précède target_hour (ADR-032).
+
+        La logique: recoverycalc (23:00) doit être le soir, target (06:00) le matin.
+        Si recoverycalc < target sur la même journée (ex: 05:00 et 08:00),
+        c'est probablement une erreur.
+
+        Args:
+            recoverycalc: Heure de coupure chauffage (format HH:MM:SS)
+            target: Heure cible réveil (format HH:MM:SS)
+
+        Returns:
+            True si la séquence est valide, False sinon.
+        """
+        try:
+            rc_parts = recoverycalc.split(":")
+            tg_parts = target.split(":")
+            rc_minutes = int(rc_parts[0]) * 60 + int(
+                rc_parts[1] if len(rc_parts) > 1 else 0
+            )
+            tg_minutes = int(tg_parts[0]) * 60 + int(
+                tg_parts[1] if len(tg_parts) > 1 else 0
+            )
+
+            # Cas valides:
+            # 1. recoverycalc (23:00) > target (06:00) - passage à minuit implicite
+            # 2. target est tôt le matin (avant midi) - toujours OK
+            if rc_minutes > tg_minutes:
+                return True  # Passage à minuit
+            if tg_minutes < 12 * 60:
+                return True  # Target le matin
+
+            # Cas invalide: recoverycalc et target dans l'après-midi, rc < tg
+            return False
+        except (ValueError, IndexError):
+            return True  # En cas d'erreur de parsing, on laisse passer
 
 
 # Clés stockées dans 'data' (configuration statique - ne change pas)

@@ -1,0 +1,125 @@
+id: 034
+title: "Gestion Centralisée des Effets de Bord via Callbacks"
+status: "Accepté"
+date: "2026-02-07"
+context: |
+  Dans le code actuel, les actions (allumer le mode relance, sauvegarder les 
+  données, calculer des coefficients) sont mélangées aux transitions d'états.
+
+  **Exemple problématique :** La méthode `on_recovery_start` change l'état ET 
+  déclenche simultanément des calculs de coefficients et des sauvegardes :
+
+  ```python
+  def on_recovery_start(self) -> None:
+      # Transition d'état
+      self.data.current_state = SmartHRTState.HEATING_PROCESS
+      self.data.recovery_calc_mode = False
+      self.data.rp_calc_mode = True
+      
+      # Snapshot de données (effet de bord)
+      self.data.time_recovery_start = dt_util.now()
+      self.data.temp_recovery_start = self.data.interior_temp
+      self.data.text_recovery_start = self.data.exterior_temp
+      
+      # Calcul (effet de bord)
+      self.calculate_rcth_at_recovery_start()
+      
+      # Persistance (effet de bord)
+      self.async_save_data()
+  ```
+
+  Ce mélange rend difficile :
+  - La compréhension du flux de contrôle
+  - Les tests unitaires (il faut mocker plusieurs systèmes)
+  - La gestion d'erreurs (si le calcul échoue, l'état a déjà changé)
+
+decision: |
+  1. **La machine à états doit retourner une liste d'actions** ou déclencher 
+     des hooks (`on_enter_state`, `on_exit_state`) :
+
+  ```python
+  @dataclass
+  class StateTransitionResult:
+      """Résultat d'une transition d'état."""
+      success: bool
+      old_state: SmartHRTState
+      new_state: SmartHRTState
+      actions: list[Action]  # Actions à exécuter par le Coordinator
+
+  class Action(StrEnum):
+      """Actions possibles après une transition."""
+      SNAPSHOT_RECOVERY_START = "snapshot_recovery_start"
+      CALCULATE_RCTH = "calculate_rcth"
+      CALCULATE_RPTH = "calculate_rpth"
+      SAVE_DATA = "save_data"
+      SCHEDULE_RECOVERY_UPDATE = "schedule_recovery_update"
+      CANCEL_RECOVERY_TIMER = "cancel_recovery_timer"
+  ```
+
+  2. **Centraliser les effets de bord dans le Coordinator** :
+
+  ```python
+  class SmartHRTCoordinator:
+      async def _execute_actions(self, actions: list[Action]) -> None:
+          """Exécute les actions demandées par la machine à états."""
+          action_handlers = {
+              Action.SNAPSHOT_RECOVERY_START: self._snapshot_recovery_start,
+              Action.CALCULATE_RCTH: self._calculate_and_update_rcth,
+              Action.CALCULATE_RPTH: self._calculate_and_update_rpth,
+              Action.SAVE_DATA: self.async_save_data,
+              Action.SCHEDULE_RECOVERY_UPDATE: self._schedule_recovery_update,
+              Action.CANCEL_RECOVERY_TIMER: self._cancel_recovery_timer,
+          }
+          
+          for action in actions:
+              handler = action_handlers.get(action)
+              if handler:
+                  await handler() if asyncio.iscoroutinefunction(handler) else handler()
+  ```
+
+  3. **Utiliser un bus d'événements interne** ou des callbacks pour que la 
+     machine à états informe le coordinateur des actions à entreprendre sans 
+     savoir *comment* elles sont réalisées :
+
+  ```python
+  class SmartHRTStateMachine:
+      def __init__(self):
+          self._action_handlers: dict[Action, Callable] = {}
+      
+      def register_action_handler(self, action: Action, handler: Callable) -> None:
+          """Enregistre un handler pour une action."""
+          self._action_handlers[action] = handler
+      
+      def _emit_action(self, action: Action) -> None:
+          """Émet une action vers le handler enregistré."""
+          if handler := self._action_handlers.get(action):
+              handler()
+  ```
+
+consequences:
+  positive:
+    - Maintenance simplifiée : si la méthode de sauvegarde change, seule une 
+      fonction dans le coordinateur est modifiée, pas la logique de la machine
+    - Prévention des bugs d'états "fantômes" où l'état change mais l'action 
+      associée échoue
+    - Facilite les tests : on peut vérifier que les bonnes actions sont émises
+      sans exécuter les effets de bord réels
+    - Meilleure gestion d'erreurs : rollback possible si une action échoue
+  negative:
+    - Indirection supplémentaire dans le flux de contrôle
+    - Nécessite une bonne documentation des actions disponibles
+  risks:
+    - L'ordre d'exécution des actions doit être bien défini
+    - Les actions asynchrones nécessitent une gestion particulière
+
+implementation_notes: |
+  - Définir l'enum `Action` dans `core/types.py`
+  - Créer `StateTransitionResult` comme dataclass
+  - Migrer progressivement les effets de bord vers des handlers dédiés
+  - Les handlers doivent être idempotents si possible
+  - Ajouter des logs pour tracer les actions exécutées
+
+related_adrs:
+  - "ADR-033: Découplage de la logique d'état (Pattern State)"
+  - "ADR-004: Stratégie hybride persistance"
+  - "ADR-019: Restauration état après redémarrage"

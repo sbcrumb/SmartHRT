@@ -1,0 +1,197 @@
+id: 036
+title: "Factorisation des Setters via Méthode Générique"
+status: "Accepté"
+date: "2026-02-07"
+context: |
+  Le coordinateur SmartHRT contient une dizaine de méthodes setters quasi-identiques
+  pour les coefficients thermiques (`set_rcth`, `set_rpth`, `set_rcth_lw`, 
+  `set_rcth_hw`, `set_rpth_lw`, `set_rpth_hw`, `set_tsp`, `set_relaxation_factor`).
+
+  **Code actuel (lignes 1823-1960) :**
+
+  ```python
+  def set_rcth(self, value: float) -> None:
+      self.data.rcth = value
+      self.calculate_recovery_time()
+      if (
+          self.data.recovery_start_hour
+          and self.data.current_state == SmartHRTState.MONITORING
+      ):
+          try:
+              self._schedule_recovery_start(self.data.recovery_start_hour)
+          except Exception as e:
+              _LOGGER.warning(
+                  "%s Erreur reprogrammation trigger: %s", self._log_prefix(), e
+              )
+      self.async_set_updated_data(self.data)
+
+  def set_rpth(self, value: float) -> None:
+      self.data.rpth = value
+      self.calculate_recovery_time()
+      # ... même code que set_rcth ...
+
+  def set_rcth_lw(self, value: float) -> None:
+      # ... même code ...
+
+  # ... 6 autres méthodes identiques ...
+  ```
+
+  **Problèmes identifiés :**
+
+  1. **Duplication massive (~150 lignes)** : Chaque setter répète le même pattern
+     de recalcul et reprogrammation de trigger.
+  2. **Risque d'inconsistance** : Si la logique de reprogrammation évolue, 
+     il faut modifier 8+ méthodes identiques.
+  3. **ADR-023 fragmentée** : La protection try/except est dupliquée partout.
+  4. **Oubli facile** : Un nouveau setter pourrait oublier la reprogrammation.
+
+decision: |
+  Créer une méthode générique `_update_and_recalculate(attr_name, value)` qui
+  centralise toute la logique de mise à jour, recalcul et reprogrammation.
+
+  **Pattern proposé :**
+
+  ```python
+  def _update_and_recalculate(
+      self, 
+      attr_name: str, 
+      value: float | dt_time,
+      recalculate: bool = True,
+      reschedule: bool = True,
+      persist: bool = False,
+  ) -> None:
+      """Met à jour un attribut et gère les effets de bord de manière centralisée.
+      
+      Args:
+          attr_name: Nom de l'attribut dans self.data (ex: "rcth", "tsp")
+          value: Nouvelle valeur à assigner
+          recalculate: Si True, recalcule recovery_time après modification
+          reschedule: Si True, reprogramme le trigger si en MONITORING
+          persist: Si True, sauvegarde les données après modification
+      
+      ADR-023: Protection try/except centralisée pour la reprogrammation.
+      """
+      # 1. Mise à jour atomique de la valeur
+      setattr(self.data, attr_name, value)
+      
+      # 2. Recalcul optionnel de l'heure de relance
+      if recalculate:
+          self.calculate_recovery_time()
+      
+      # 3. Reprogrammation du trigger si nécessaire (ADR-023)
+      if (
+          reschedule
+          and self.data.recovery_start_hour
+          and self.data.current_state == SmartHRTState.MONITORING
+      ):
+          try:
+              self._schedule_recovery_start(self.data.recovery_start_hour)
+          except Exception as e:
+              _LOGGER.warning(
+                  "%s Erreur reprogrammation trigger: %s",
+                  self._log_prefix(),
+                  e,
+              )
+      
+      # 4. Notification des entités
+      self.async_set_updated_data(self.data)
+      
+      # 5. Persistance optionnelle
+      if persist:
+          self.hass.async_create_task(self._save_learned_data())
+  ```
+
+  **Refactorisation des setters :**
+
+  ```python
+  # Avant: 8 méthodes de ~15 lignes chacune
+  # Après: 8 méthodes d'une ligne chacune
+
+  def set_rcth(self, value: float) -> None:
+      self._update_and_recalculate("rcth", value)
+
+  def set_rpth(self, value: float) -> None:
+      self._update_and_recalculate("rpth", value)
+
+  def set_rcth_lw(self, value: float) -> None:
+      self._update_and_recalculate("rcth_lw", value)
+
+  def set_rcth_hw(self, value: float) -> None:
+      self._update_and_recalculate("rcth_hw", value)
+
+  def set_rpth_lw(self, value: float) -> None:
+      self._update_and_recalculate("rpth_lw", value)
+
+  def set_rpth_hw(self, value: float) -> None:
+      self._update_and_recalculate("rpth_hw", value)
+
+  def set_tsp(self, value: float) -> None:
+      self._update_and_recalculate("tsp", value)
+
+  def set_relaxation_factor(self, value: float) -> None:
+      self._update_and_recalculate("relaxation_factor", value, recalculate=False)
+
+  def set_target_hour(self, value: dt_time) -> None:
+      self._update_and_recalculate(
+          "target_hour", value, 
+          reschedule=False,  # Géré par _setup_time_triggers
+          persist=True,
+      )
+      self._setup_time_triggers()
+
+  def set_recoverycalc_hour(self, value: dt_time) -> None:
+      self._update_and_recalculate(
+          "recoverycalc_hour", value,
+          recalculate=False,
+          reschedule=False,
+          persist=True,
+      )
+      self._setup_time_triggers()
+  ```
+
+  **Alternative avec décorateur :**
+
+  ```python
+  from functools import wraps
+
+  def with_recalculation(recalculate=True, reschedule=True, persist=False):
+      """Décorateur pour setters avec gestion automatique des effets de bord."""
+      def decorator(func):
+          @wraps(func)
+          def wrapper(self, value):
+              func(self, value)  # Exécute le setter minimal
+              if recalculate:
+                  self.calculate_recovery_time()
+              if reschedule and self.data.recovery_start_hour:
+                  self._safe_reschedule_trigger()
+              self.async_set_updated_data(self.data)
+              if persist:
+                  self.hass.async_create_task(self._save_learned_data())
+          return wrapper
+      return decorator
+
+  # Usage
+  @with_recalculation()
+  def set_rcth(self, value: float) -> None:
+      self.data.rcth = value
+  ```
+
+consequences:
+  positive:
+    - Réduction drastique du code (~120 lignes supprimées)
+    - Logique de reprogrammation en un seul endroit
+    - ADR-023 appliquée une seule fois, pas 8 fois
+    - Ajout de nouveaux setters simplifié (1 ligne)
+    - Tests unitaires de la logique commune simplifiés
+  negative:
+    - Indirection supplémentaire (moins explicite)
+    - Désactiver le recalcul nécessite de passer un paramètre
+  risks:
+    - S'assurer que tous les cas sont couverts par les paramètres
+    - Les setters personnalisés (target_hour) gardent leur logique spécifique
+
+implementation_notes: |
+  - La méthode `_update_and_recalculate` utilise `setattr` pour la flexibilité
+  - Les setters pour les heures (target_hour, recoverycalc_hour) ont une logique
+    légèrement différente (reconfigure les triggers au lieu de reprogrammer)
+  - Le décorateur est une alternative élégante mais peut compliquer le débogage

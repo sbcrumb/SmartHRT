@@ -4,17 +4,32 @@ ADR implémentées dans ce module:
 - ADR-001: Architecture globale (setup/async_unload_entry)
 - ADR-012: Exposition entités pour Lovelace (forward_entry_setups)
 - ADR-016: Nettoyage des entités time obsolètes
+- ADR-045: Validation Pydantic au runtime pour la configuration
 """
 
 import logging
+
+from pydantic import ValidationError
 
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers import entity_registry as er
 
-from .const import DOMAIN, PLATFORMS, DATA_COORDINATOR
+from .const import (
+    DOMAIN,
+    PLATFORMS,
+    DATA_COORDINATOR,
+    CONF_TARGET_HOUR,
+    CONF_RECOVERYCALC_HOUR,
+    CONF_TSP,
+    CONF_NAME,
+    CONF_SENSOR_INTERIOR_TEMP,
+    CONF_WEATHER_ENTITY,
+    DEFAULT_TSP,
+)
 from .coordinator import SmartHRTCoordinator
 from .services import async_setup_services, async_unload_services
+from .models import ConfigFlowDataModel
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -154,12 +169,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Applique les changements d'options sans recharger l'intégration.
 
+    ADR-045: Utilise la validation Pydantic avant d'appliquer les options.
+
     Les options dynamiques (target_hour, recoverycalc_hour, tsp) peuvent
     être appliquées à chaud via le coordinateur, évitant un rechargement
     complet qui réinitialiserait l'état de la machine à états.
     """
-    from .const import CONF_TARGET_HOUR, CONF_RECOVERYCALC_HOUR, CONF_TSP
-
     coordinator = hass.data[DOMAIN][entry.entry_id].get(DATA_COORDINATOR)
     if not coordinator:
         _LOGGER.warning("Coordinator not found for entry %s", entry.entry_id)
@@ -168,14 +183,51 @@ async def update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
     options = entry.options
     _LOGGER.debug("Applying options update: %s", options)
 
-    # Appliquer les changements d'options au coordinateur
+    # ADR-045: Validation Pydantic avant application
+    try:
+        validated = ConfigFlowDataModel(
+            name=entry.data.get(CONF_NAME, "SmartHRT"),
+            target_hour=options.get(
+                CONF_TARGET_HOUR,
+                entry.data.get(CONF_TARGET_HOUR, "06:00:00"),
+            ),
+            recoverycalc_hour=options.get(
+                CONF_RECOVERYCALC_HOUR,
+                entry.data.get(CONF_RECOVERYCALC_HOUR, "23:00:00"),
+            ),
+            tsp=options.get(CONF_TSP, entry.data.get(CONF_TSP, DEFAULT_TSP)),
+            sensor_interior_temperature=entry.data.get(
+                CONF_SENSOR_INTERIOR_TEMP, "sensor.temperature"
+            ),
+            weather_entity=entry.data.get(CONF_WEATHER_ENTITY, "weather.home"),
+        )
+    except ValidationError as e:
+        _LOGGER.error("ADR-045: Configuration invalide: %s", e)
+        # Notifier l'utilisateur via persistent_notification
+        await hass.services.async_call(
+            "persistent_notification",
+            "create",
+            {
+                "title": "SmartHRT - Configuration invalide",
+                "message": f"Erreur de validation: {e}",
+                "notification_id": "smarthrt_config_error",
+            },
+        )
+        return  # Ne pas appliquer la configuration invalide
+
+    # Appliquer uniquement si la validation a réussi
     if CONF_TSP in options:
-        coordinator.set_tsp(options[CONF_TSP])
+        coordinator.set_tsp(validated.tsp)
 
     if CONF_TARGET_HOUR in options:
-        target_time = coordinator._parse_time(options[CONF_TARGET_HOUR])
-        coordinator.set_target_hour(target_time)
+        coordinator.set_target_hour(validated.target_hour_as_time)
 
     if CONF_RECOVERYCALC_HOUR in options:
-        recoverycalc_time = coordinator._parse_time(options[CONF_RECOVERYCALC_HOUR])
-        coordinator.set_recoverycalc_hour(recoverycalc_time)
+        coordinator.set_recoverycalc_hour(validated.recoverycalc_hour_as_time)
+
+    _LOGGER.info(
+        "ADR-045: Configuration validée et appliquée (tsp=%.1f, target=%s, recovery=%s)",
+        validated.tsp,
+        validated.target_hour,
+        validated.recoverycalc_hour,
+    )

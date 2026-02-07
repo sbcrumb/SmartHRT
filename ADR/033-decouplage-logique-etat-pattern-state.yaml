@@ -1,0 +1,114 @@
+id: 033
+title: "Découplage de la Logique d'État (Pattern State)"
+status: "Accepté"
+date: "2026-02-07"
+context: |
+  L'analyse du code actuel de `SmartHRTCoordinator` montre que bien qu'une 
+  machine à états soit présente (ADR-003 et ADR-028), elle souffre d'un couplage 
+  fort entre la logique de transition, les calculs thermiques et la gestion des 
+  entités Home Assistant.
+
+  Actuellement, la logique de transition est éparpillée dans `coordinator.py` 
+  au travers de méthodes comme `_on_temperature_decrease_detected`, 
+  `on_recovery_start` ou `_async_on_recoverycalc_hour`. Le coordinateur est une 
+  "God Class" qui gère à la fois les événements HA, le stockage et les 
+  changements d'états.
+
+  **Problèmes identifiés :**
+
+  1. **Non-respect du découplage :** La méthode `on_recovery_start` manipule 
+     directement `self.data.current_state`, `self.data.time_recovery_start` et 
+     appelle `self.calculate_rcth_at_recovery_start()`. Elle mélange transition, 
+     snapshot de données et calcul.
+
+  2. **Testabilité limitée :** Les tests unitaires de la logique pure de 
+     transition sont impossibles sans simuler l'intégralité du 
+     `DataUpdateCoordinator`.
+
+  3. **Logique de restauration fragile :** La méthode `_restore_state_after_restart` 
+     tente de reconstruire la cohérence a posteriori avec des blocs `if/elif` 
+     complexes, ce qui prouve que l'état persisté n'est pas suffisant à lui seul 
+     pour garantir la reprise.
+
+decision: |
+  1. **Extraire la logique de transition** dans une classe `SmartHRTStateMachine` 
+     indépendante de Home Assistant :
+
+  ```python
+  class SmartHRTStateMachine:
+      """Machine à états Pure Python (sans dépendance HA)."""
+      
+      def __init__(self, initial_state: SmartHRTState = SmartHRTState.MONITORING):
+          self._state = initial_state
+          self._on_enter_callbacks: dict[SmartHRTState, list[Callable]] = {}
+          self._on_exit_callbacks: dict[SmartHRTState, list[Callable]] = {}
+      
+      @property
+      def state(self) -> SmartHRTState:
+          return self._state
+      
+      def transition_to(self, new_state: SmartHRTState) -> bool:
+          """Effectue une transition si elle est valide."""
+          if new_state not in VALID_TRANSITIONS.get(self._state, []):
+              return False
+          
+          # Exécuter les callbacks de sortie
+          for callback in self._on_exit_callbacks.get(self._state, []):
+              callback(self._state, new_state)
+          
+          old_state = self._state
+          self._state = new_state
+          
+          # Exécuter les callbacks d'entrée
+          for callback in self._on_enter_callbacks.get(new_state, []):
+              callback(old_state, new_state)
+          
+          return True
+  ```
+
+  2. **Implémenter le Pattern State** : chaque état (`MONITORING`, `RECOVERY`, etc.) 
+     peut devenir une sous-classe ou une fonction de gestion recevant des signaux.
+
+  3. **Le Coordinator devient un orchestrateur pur** : il reçoit un événement HA 
+     (ex: changement de température), le transmet à la machine à états, et 
+     exécute les actions (effets de bord) demandées par le nouvel état.
+
+  ```python
+  class SmartHRTCoordinator:
+      def __init__(self, ...):
+          self._state_machine = SmartHRTStateMachine()
+          # Enregistrer les callbacks
+          self._state_machine.on_enter(SmartHRTState.HEATING_PROCESS, self._handle_enter_heating)
+          self._state_machine.on_exit(SmartHRTState.MONITORING, self._handle_exit_monitoring)
+      
+      async def _handle_temperature_change(self, new_temp: float):
+          """Orchestration : événement HA -> machine -> actions."""
+          if self._should_start_recovery(new_temp):
+              self._state_machine.transition_to(SmartHRTState.HEATING_PROCESS)
+              # Les callbacks font le reste
+  ```
+
+consequences:
+  positive:
+    - Testabilité totale de la logique de transition avec de simples tests unitaires Python
+    - Respect du principe de responsabilité unique (SRP)
+    - La machine à états peut être réutilisée dans d'autres contextes
+    - Réduction de la complexité cyclomatique du Coordinator
+    - Facilite l'ajout de nouveaux états sans modifier le code existant
+  negative:
+    - Refactoring significatif du code existant
+    - Nécessite une phase de migration avec tests de non-régression
+  risks:
+    - La migration doit être progressive pour éviter les régressions
+    - Les callbacks doivent être bien documentés pour maintenir la lisibilité
+
+implementation_notes: |
+  - Créer le module `core/state_machine.py` avec `SmartHRTStateMachine`
+  - Migrer progressivement les méthodes de transition du Coordinator
+  - Les tests existants (`test_state_machine_*.py`) devront être adaptés
+  - Conserver la compatibilité avec la persistance existante (ADR-004)
+
+related_adrs:
+  - "ADR-003: Machine à états cycle chauffage (implémentation initiale)"
+  - "ADR-028: Modernisation StrEnum machine à états"
+  - "ADR-026: Extraction modèle thermique (même approche de découplage)"

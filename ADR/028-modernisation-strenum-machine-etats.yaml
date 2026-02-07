@@ -1,0 +1,109 @@
+id: 028
+title: "Modernisation avec StrEnum pour la machine à états"
+status: "Accepté"
+date: "2026-02-03"
+context: |
+  La classe `SmartHRTState` utilise actuellement des constantes string classiques :
+
+  ```python
+  class SmartHRTState:
+      HEATING_ON = "heating_on"
+      DETECTING_LAG = "detecting_lag"
+      MONITORING = "monitoring"
+      RECOVERY = "recovery"
+      HEATING_PROCESS = "heating_process"
+  ```
+
+  Cette approche présente des limitations :
+  - Pas de validation à l'assignation (on peut assigner n'importe quelle string)
+  - Pas d'autocomplétion robuste dans les IDE
+  - Pas d'itération sur les états possibles
+  - Pattern non standard pour Python moderne
+
+  De plus, la logique de transition est dispersée dans le coordinateur
+  via de multiples blocs `if/elif` dans différentes méthodes :
+  - `_async_on_recoverycalc_hour()` : HEATING_ON → DETECTING_LAG
+  - `_on_temperature_decrease_detected()` : DETECTING_LAG → MONITORING
+  - `on_recovery_start()` : MONITORING → RECOVERY
+  - etc.
+
+decision: |
+  1. **Migrer vers `StrEnum`** (Python 3.11+, ou backport `enum.StrEnum`) :
+
+  ```python
+  from enum import StrEnum
+
+  class SmartHRTState(StrEnum):
+      HEATING_ON = "heating_on"
+      DETECTING_LAG = "detecting_lag"
+      MONITORING = "monitoring"
+      RECOVERY = "recovery"
+      HEATING_PROCESS = "heating_process"
+  ```
+
+  Avantages :
+  - `SmartHRTState.HEATING_ON == "heating_on"` → True (compatibilité JSON/stockage)
+  - Validation automatique à l'assignation
+  - Itérable : `list(SmartHRTState)` retourne tous les états
+  - Meilleur support IDE et mypy
+
+  2. **Structurer les transitions avec un pattern State/Handler** (optionnel) :
+
+  Pour clarifier les transitions dans `_periodic_update` et les callbacks,
+  on peut introduire une table de transitions :
+
+  ```python
+  VALID_TRANSITIONS: dict[SmartHRTState, set[SmartHRTState]] = {
+      SmartHRTState.HEATING_ON: {SmartHRTState.DETECTING_LAG},
+      SmartHRTState.DETECTING_LAG: {SmartHRTState.MONITORING},
+      SmartHRTState.MONITORING: {SmartHRTState.RECOVERY},
+      SmartHRTState.RECOVERY: {SmartHRTState.HEATING_PROCESS},
+      SmartHRTState.HEATING_PROCESS: {SmartHRTState.HEATING_ON},
+  }
+
+  def transition_to(self, new_state: SmartHRTState) -> bool:
+      """Effectue une transition d'état si valide."""
+      if new_state in VALID_TRANSITIONS.get(self.data.current_state, set()):
+          _LOGGER.info("%s Transition %s → %s", self._log_prefix(),
+                       self.data.current_state, new_state)
+          self.data.current_state = new_state
+          return True
+      _LOGGER.warning("%s Transition invalide %s → %s", self._log_prefix(),
+                      self.data.current_state, new_state)
+      return False
+  ```
+
+  3. **Typing strict** avec annotations partout :
+
+  ```python
+  # Avant
+  current_state: str = SmartHRTState.HEATING_ON
+
+  # Après
+  current_state: SmartHRTState = SmartHRTState.HEATING_ON
+  ```
+
+consequences:
+  positive:
+    - Type safety renforcée avec validation automatique
+    - Meilleure autocomplétion et détection d'erreurs IDE
+    - Compatibilité JSON préservée grâce à StrEnum
+    - Documentation implicite des états valides
+    - Pattern de transition explicite et auditable
+    - Facilite l'ajout de nouveaux états
+  negative:
+    - Requiert Python 3.11+ (ou backport)
+    - Léger refactoring des comparaisons existantes
+  risks:
+    - Vérifier la compatibilité avec la sérialisation JSON du Store
+
+implementation_notes: |
+  - `StrEnum` est disponible nativement depuis Python 3.11
+  - Pour Python < 3.11, utiliser : `class SmartHRTState(str, Enum): ...`
+  - La sérialisation JSON fonctionne automatiquement car StrEnum hérite de str
+  - Les tests existants devraient passer car les comparaisons string restent valides
+
+related_adrs:
+  - "ADR-003: Machine à états cycle chauffage (définition initiale)"
+  - "ADR-019: Restauration état après redémarrage (sérialisation compatible)"
+  - "ADR-024: Sérialisation types persisted fields (compatible StrEnum)"

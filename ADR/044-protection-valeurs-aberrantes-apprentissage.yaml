@@ -1,0 +1,142 @@
+id: 044
+title: "Protection contre les valeurs aberrantes (Outliers) dans l'apprentissage"
+status: "Accepté"
+date: "2026-02-07"
+context: |
+  Le `ThermalSolver` utilise un facteur de relaxation pour lisser l'apprentissage 
+  des coefficients `RCth` et `RPth`. Cependant, une valeur de capteur erronée 
+  (spike de température, déconnexion temporaire, interférence) peut encore 
+  faire diverger les coefficients.
+
+  **Scénarios problématiques identifiés :**
+
+  1. **Spike de température :** Le capteur renvoie brièvement 35°C au lieu de 
+     19°C, ce qui donne un RPth calculé anormalement élevé.
+
+  2. **Déconnexion temporaire :** Le capteur renvoie 0°C ou -999°C pendant 
+     une courte période, faussant le calcul de RCth.
+
+  3. **Interférence externe :** L'utilisateur ouvre une fenêtre pendant le 
+     cycle, créant un refroidissement artificiel qui donne un RCth très bas.
+
+  **Code actuel (sans protection) :**
+
+  ```python
+  def update_coefficients(self, ...):
+      # Calcul de la nouvelle valeur
+      new_main = (current_main + relax * calculated_value) / (1 + relax)
+      
+      # Pas de validation de l'écart !
+      return CoefficientUpdateResult(
+          coef_lw=new_lw,
+          coef_hw=new_hw,
+          coef_main=max(coef_min, new_main),
+          error=round(err, 3),
+      )
+  ```
+
+  Même avec un facteur de relaxation de 2.0, une valeur calculée aberrante 
+  (ex: RCth = 500 au lieu de 50) va tirer la moyenne vers le haut de manière 
+  significative.
+
+decision: |
+  1. **Ajouter un filtre de validation** dans `ThermalSolver.update_coefficients` :
+
+  ```python
+  def update_coefficients(
+      self,
+      coef_type: str,
+      current_lw: float,
+      current_hw: float,
+      current_main: float,
+      calculated_value: float,
+      wind_kmh: float,
+      relaxation_factor: float,
+      outlier_threshold_percent: float = 50.0,  # Nouveau paramètre
+  ) -> CoefficientUpdateResult:
+      """Met à jour les coefficients avec protection outliers."""
+      
+      # ADR-044: Protection contre les valeurs aberrantes
+      if current_main > 0:
+          deviation_percent = abs(calculated_value - current_main) / current_main * 100
+          
+          if deviation_percent > outlier_threshold_percent:
+              self._logger.warning(
+                  "Outlier détecté pour %s: calculé=%.2f, actuel=%.2f (écart=%.1f%%)",
+                  coef_type, calculated_value, current_main, deviation_percent
+              )
+              # Option 1: Ignorer complètement la mise à jour
+              # return CoefficientUpdateResult(
+              #     coef_lw=current_lw, coef_hw=current_hw,
+              #     coef_main=current_main, error=0.0, outlier_rejected=True
+              # )
+              
+              # Option 2: Plafonner la valeur calculée
+              max_allowed = current_main * (1 + outlier_threshold_percent / 100)
+              min_allowed = current_main * (1 - outlier_threshold_percent / 100)
+              calculated_value = max(min_allowed, min(max_allowed, calculated_value))
+              self._logger.info(
+                  "Valeur plafonnée à %.2f pour %s", calculated_value, coef_type
+              )
+      
+      # Suite du calcul normal...
+  ```
+
+  2. **Paramètres de configuration** ajoutés à `ThermalConfig` :
+
+  ```python
+  @dataclass
+  class ThermalConfig:
+      # ... existants ...
+      
+      # ADR-044: Protection outliers
+      outlier_threshold_percent: float = 50.0  # Écart max autorisé en %
+      outlier_mode: str = "clamp"  # "clamp" ou "reject"
+  ```
+
+  3. **Enrichir `CoefficientUpdateResult`** pour tracer les rejets :
+
+  ```python
+  @dataclass
+  class CoefficientUpdateResult:
+      coef_lw: float
+      coef_hw: float
+      coef_main: float
+      error: float
+      outlier_rejected: bool = False  # Nouveau champ
+      original_calculated: float | None = None  # Valeur avant plafonnement
+  ```
+
+consequences:
+  positive:
+    - "Robustesse accrue face aux bruits de mesure des capteurs"
+    - "Les coefficients ne divergent plus suite à une erreur ponctuelle"
+    - "Logs d'avertissement permettent de détecter les capteurs défaillants"
+    - "Comportement prévisible même en cas de données erronées"
+  negative:
+    - "Un seuil trop strict peut ralentir l'apprentissage lors de changements réels"
+    - "Nécessite un réglage initial du paramètre `outlier_threshold_percent`"
+
+implementation_notes: |
+  **Fichiers impactés :**
+  - `core/thermal.py` : Modification de `update_coefficients`
+  - `core/types.py` : Extension de `ThermalConfig` et `CoefficientUpdateResult`
+
+  **Choix du seuil :**
+  - 50% semble raisonnable : un RCth de 50h ne devrait pas soudainement 
+    devenir 75h ou 25h en un seul cycle.
+  - Peut être ajusté via la configuration si nécessaire.
+
+  **Mode recommandé :**
+  - `clamp` (plafonnement) plutôt que `reject` pour permettre une adaptation 
+    progressive même en cas de changement réel des conditions.
+
+  **Tests à ajouter :**
+  - Test avec valeur calculée = 10x la valeur actuelle
+  - Test avec valeur calculée = 0.1x la valeur actuelle
+  - Test du mode `reject` vs `clamp`
+
+related_adrs:
+  - "ADR-006: Apprentissage continu et auto-adaptativité"
+  - "ADR-026: Extraction du modèle thermique en Pure Python"
+  - "ADR-031: Optimisation algorithmique avec convergence adaptative"

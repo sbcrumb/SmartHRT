@@ -1,0 +1,204 @@
+id: 039
+title: "Simplification de la Logique de Restauration (Auto-Correction)"
+status: "Accepté"
+date: "2026-02-07"
+context: |
+  La méthode `_determine_expected_state_for_time()` (lignes 1523-1590) contient
+  une logique complexe pour déterminer l'état "attendu" de la machine à états
+  basé sur l'heure actuelle lors d'un redémarrage de Home Assistant.
+
+  **Code actuel :**
+
+  ```python
+  def _determine_expected_state_for_time(self, now: datetime) -> SmartHRTState:
+      current_time = now.time()
+      target = self.data.target_hour
+      recoverycalc = self.data.recoverycalc_hour
+      recovery_start_datetime = self.data.recovery_start_hour
+
+      # 1. Si on a dépassé recovery_start_datetime => potentiellement HEATING_PROCESS
+      if recovery_start_datetime and now >= recovery_start_datetime:
+          target_datetime_today = now.replace(hour=target.hour, minute=target.minute, ...)
+          if now.date() == recovery_start_datetime.date() and now >= target_datetime_today:
+              return SmartHRTState.HEATING_ON
+          if now.date() > recovery_start_datetime.date() and current_time >= target:
+              return SmartHRTState.HEATING_ON
+          return SmartHRTState.HEATING_PROCESS
+
+      # 2. Déterminer si on est en période "jour" ou "nuit"
+      if target < recoverycalc:
+          if target <= current_time < recoverycalc:
+              return SmartHRTState.HEATING_ON
+          else:
+              return SmartHRTState.MONITORING
+      else:
+          # Cas atypique: recoverycalc < target
+          ...
+  ```
+
+  **Problèmes identifiés :**
+
+  1. **Complexité cycomatique élevée** : Nombreuses conditions imbriquées
+     sur les dates et heures.
+
+  2. **Cas limites fragiles** : La gestion du "jour suivant" et du "cas atypique"
+     (recoverycalc > target) multiplie les branches.
+
+  3. **Tentative de "deviner" l'état** : La méthode essaie de reconstruire
+     l'historique au lieu de se fier à la persistance.
+
+  4. **Incohérence avec ADR-019** : L'ADR-019 décrit une logique de restauration,
+     mais le code actuel "sur-corrige" les incohérences.
+
+  **Scénario problématique :**
+
+  HA redémarre à 05:30, `recovery_start_hour` est 05:00, `target_hour` est 06:00.
+  L'état persisté est MONITORING (correct au moment de la sauvegarde).
+  La méthode détermine que l'état attendu est HEATING_PROCESS et force une
+  transition, mais sans les snapshots de `temp_recovery_start` qui auraient
+  dû être pris à 05:00.
+
+decision: |
+  Simplifier radicalement la logique de restauration en adoptant le principe
+  **"Trust the Persistence, Verify Minimally"** :
+
+  **1. Principe de base :**
+
+  - L'état persisté est la source de vérité
+  - La vérification de cohérence est minimaliste (2 règles simples)
+  - En cas d'incohérence, on revient à un état "sûr" (HEATING_ON)
+
+  **2. Nouvelle implémentation :**
+
+  ```python
+  def _is_state_coherent(self, persisted_state: SmartHRTState, now: datetime) -> bool:
+      """Vérifie si l'état persisté est cohérent avec l'heure actuelle.
+      
+      Règles simplifiées :
+      1. MONITORING/DETECTING_LAG sont valides la nuit (après recoverycalc, avant target)
+      2. HEATING_PROCESS/RECOVERY sont valides si recovery_start_hour <= now < target
+      3. HEATING_ON est toujours valide (état par défaut)
+      """
+      if persisted_state == SmartHRTState.HEATING_ON:
+          return True  # Toujours valide
+      
+      current_time = now.time()
+      target = self.data.target_hour
+      recoverycalc = self.data.recoverycalc_hour
+      
+      is_night = self._is_night_period(current_time, target, recoverycalc)
+      
+      if persisted_state in (SmartHRTState.MONITORING, SmartHRTState.DETECTING_LAG):
+          return is_night
+      
+      if persisted_state in (SmartHRTState.RECOVERY, SmartHRTState.HEATING_PROCESS):
+          if not self.data.recovery_start_hour:
+              return False  # Pas de recovery_start_hour = incohérent
+          return now >= self.data.recovery_start_hour and current_time < target
+      
+      return False  # État inconnu
+
+  def _is_night_period(
+      self, current_time: dt_time, target: dt_time, recoverycalc: dt_time
+  ) -> bool:
+      """Détermine si on est en période nocturne (entre recoverycalc et target)."""
+      if target < recoverycalc:
+          # Cas normal: target=06:00, recoverycalc=23:00
+          return current_time >= recoverycalc or current_time < target
+      else:
+          # Cas atypique: recoverycalc=13:30, target=17:30
+          return recoverycalc <= current_time < target
+  ```
+
+  **3. Restauration simplifiée :**
+
+  ```python
+  async def _restore_state_after_restart(self) -> None:
+      """Restaure l'état après redémarrage avec vérification minimale."""
+      persisted_state = self.data.current_state
+      now = dt_util.now()
+
+      _LOGGER.info(
+          "%s Restauration - État persisté: %s",
+          self._log_prefix(),
+          persisted_state,
+      )
+
+      # Vérification de cohérence minimale
+      if not self._is_state_coherent(persisted_state, now):
+          _LOGGER.warning(
+              "%s État incohérent %s pour l'heure actuelle, reset à HEATING_ON",
+              self._log_prefix(),
+              persisted_state,
+          )
+          self.force_state(SmartHRTState.HEATING_ON)
+          await self._save_learned_data()
+          return
+
+      # État cohérent : reprogrammer les triggers nécessaires
+      self._restore_triggers_for_state(persisted_state, now)
+
+  def _restore_triggers_for_state(self, state: SmartHRTState, now: datetime) -> None:
+      """Reprogramme les triggers appropriés pour l'état restauré."""
+      if state == SmartHRTState.MONITORING:
+          if self.data.recovery_start_hour:
+              if self.data.recovery_start_hour > now:
+                  self._schedule_recovery_start(self.data.recovery_start_hour)
+              else:
+                  # L'heure est passée mais on était en MONITORING = on démarre
+                  self.on_recovery_start()
+      
+      elif state == SmartHRTState.DETECTING_LAG:
+          # La surveillance de température reprendra automatiquement
+          pass
+      
+      elif state in (SmartHRTState.RECOVERY, SmartHRTState.HEATING_PROCESS):
+          # Vérifier si target_hour est dépassée
+          target_dt = now.replace(
+              hour=self.data.target_hour.hour,
+              minute=self.data.target_hour.minute,
+              second=0,
+              microsecond=0,
+          )
+          if now >= target_dt:
+              self.on_recovery_end()
+      
+      # HEATING_ON: rien à faire
+  ```
+
+  **4. Principe "Auto-Correcteur" :**
+
+  Au lieu de "deviner" l'état correct, la machine à états devient auto-correctrice :
+
+  - Si l'état persisté est incohérent → reset à HEATING_ON
+  - Le prochain trigger horaire (recoverycalc_hour ou target_hour) remettra
+    le système sur les bons rails
+  - Maximum 24h de "dérive" dans le pire cas
+
+  ```
+  Exemple: HA redémarre à 10:00, état persisté = MONITORING (incohérent)
+  → Reset à HEATING_ON
+  → À 23:00 (recoverycalc_hour), le cycle normal reprend automatiquement
+  ```
+
+consequences:
+  positive:
+    - Complexité cycomatique réduite de ~15 à ~5
+    - Logique compréhensible en lisant le code
+    - Pas de reconstruction d'état "deviné"
+    - Auto-correction naturelle via les triggers quotidiens
+    - Tests unitaires simplifiés (moins de cas limites)
+  negative:
+    - En cas d'incohérence, perte potentielle de l'optimisation du jour
+    - Le reset à HEATING_ON force à attendre le prochain cycle
+  risks:
+    - Si recoverycalc_hour et target_hour sont mal configurés,
+      le système peut rester en HEATING_ON longtemps
+    - Tester les cas de changement d'heure (heure d'été/hiver)
+
+implementation_notes: |
+  - Supprimer entièrement `_determine_expected_state_for_time()`
+  - La nouvelle logique ne tente pas de "reconstruire" l'état manquant
+  - Les snapshots (temp_recovery_*, time_recovery_*) sont préservés en mémoire
+    mais un reset à HEATING_ON les invalidera pour le cycle en cours
+  - Logger clairement les resets pour diagnostic utilisateur

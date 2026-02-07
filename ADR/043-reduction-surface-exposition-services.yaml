@@ -1,0 +1,142 @@
+id: 043
+title: "Réduction drastique de la surface d'exposition des Services"
+status: "Accepté"
+date: "2026-02-07"
+context: |
+  L'intégration SmartHRT expose actuellement 12 services dans `services.yaml`, 
+  incluant des fonctions internes (calculs intermédiaires) qui ne devraient pas 
+  être déclenchées manuellement par l'utilisateur.
+
+  **Services actuellement exposés :**
+
+  1. `start_heating_cycle` - Essentiel
+  2. `stop_heating` - Essentiel
+  3. `start_recovery` - Essentiel
+  4. `end_recovery` - Essentiel
+  5. `get_state` - Essentiel (diagnostic)
+  6. `reset_learning` - Utilitaire
+  7. `trigger_calculation` - Utilitaire
+  8. `calculate_recovery_time` - Interne (devrait être privé)
+  9. `calculate_recovery_update_time` - Interne (devrait être privé)
+  10. `calculate_rcth_fast` - Interne (devrait être privé)
+  11. `on_heating_stop` - Doublon avec `start_heating_cycle`
+  12. `on_recovery_start` / `on_recovery_end` - Doublons
+
+  **Problèmes identifiés :**
+
+  1. **Confusion utilisateur :** Un utilisateur appelant `calculate_rcth_fast` 
+     manuellement peut polluer l'apprentissage des coefficients.
+
+  2. **Surface d'attaque :** Plus de services exposés = plus de risques d'appels 
+     erronés ou malveillants.
+
+  3. **Maintenance :** Chaque service doit être documenté et testé, ce qui 
+     augmente la charge de travail.
+
+decision: |
+  1. **Supprimer les services de calcul interne** du `services.yaml` :
+     - `calculate_recovery_time`
+     - `calculate_recovery_update_time`
+     - `calculate_rcth_fast`
+
+  2. **Fusionner les services historiques avec les nouveaux services simplifiés** :
+     - `on_heating_stop` → fusionné dans `start_heating_cycle`
+     - `on_recovery_start` → fusionné dans `start_recovery`
+     - `on_recovery_end` → fusionné dans `end_recovery`
+
+  3. **Ne conserver que 7 services essentiels** :
+
+  | Service | Description | Usage |
+  |---------|-------------|-------|
+  | `start_heating_cycle` | Démarre un nouveau cycle de chauffage | Automatisation |
+  | `stop_heating` | Arrête le chauffage et réinitialise | Automatisation |
+  | `start_recovery` | Déclenche manuellement la relance | Automatisation |
+  | `end_recovery` | Termine manuellement la relance | Automatisation |
+  | `get_state` | Retourne l'état complet du coordinateur | Diagnostic |
+  | `reset_learning` | Réinitialise les coefficients appris | Maintenance |
+  | `trigger_calculation` | Force un recalcul du temps de relance | Utilitaire |
+
+  4. **Nouveau `services.yaml` simplifié :**
+
+  ```yaml
+  start_heating_cycle:
+    name: "Démarrer un cycle de chauffage"
+    description: "Démarre un nouveau cycle d'apprentissage..."
+    target:
+      entity:
+        integration: smarthrt
+
+  stop_heating:
+    name: "Arrêter le chauffage"
+    description: "Arrête le cycle en cours et réinitialise..."
+    target:
+      entity:
+        integration: smarthrt
+
+  start_recovery:
+    name: "Démarrer la relance"
+    description: "Déclenche manuellement la phase de relance..."
+    target:
+      entity:
+        integration: smarthrt
+
+  end_recovery:
+    name: "Terminer la relance"
+    description: "Termine manuellement la phase de relance..."
+    target:
+      entity:
+        integration: smarthrt
+
+  get_state:
+    name: "Obtenir l'état"
+    description: "Retourne l'état complet du coordinateur..."
+    target:
+      entity:
+        integration: smarthrt
+
+  reset_learning:
+    name: "Réinitialiser l'apprentissage"
+    description: "Remet les coefficients RCth/RPth à 50..."
+    target:
+      entity:
+        integration: smarthrt
+
+  trigger_calculation:
+    name: "Forcer le calcul"
+    description: "Force un recalcul immédiat du temps de relance..."
+    target:
+      entity:
+        integration: smarthrt
+  ```
+
+consequences:
+  positive:
+    - "Interface utilisateur plus claire et moins intimidante"
+    - "Réduction des appels de services erronés qui polluent l'apprentissage"
+    - "Documentation simplifiée"
+    - "Moins de code à maintenir dans `services.py`"
+  negative:
+    - "Perte de flexibilité pour les utilisateurs avancés"
+    - "Migration nécessaire pour les automatisations existantes"
+
+implementation_notes: |
+  **Fichiers impactés :**
+  - `services.yaml` : Suppression des services internes
+  - `services.py` : Suppression des handlers correspondants
+  - `const.py` : Mise à jour des constantes SERVICE_*
+
+  **Migration :**
+  - Documenter clairement les équivalences dans les release notes
+  - Les services supprimés peuvent être conservés en interne (méthodes privées)
+
+  **Exemple de mapping pour migration :**
+  ```
+  calculate_recovery_time → trigger_calculation
+  on_heating_stop → start_heating_cycle
+  on_recovery_start → start_recovery
+  on_recovery_end → end_recovery
+  ```
+
+related_adrs:
+  - "ADR-042: Centralisation du pilotage par méthodes Façade"
+  - "ADR-012: Exposition d'entités et services"

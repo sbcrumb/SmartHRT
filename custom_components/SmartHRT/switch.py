@@ -4,6 +4,7 @@ ADR implémentées dans ce module:
 - ADR-003: Activation/désactivation de la machine à états (SmartHeatingSwitch)
 - ADR-006: Mode adaptatif pour l'apprentissage (AdaptiveSwitch)
 - ADR-012: Exposition entités pour Lovelace (switches comme entités HA)
+- ADR-027: Utilisation de CoordinatorEntity pour synchronisation automatique
 """
 
 import logging
@@ -13,6 +14,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.helpers.device_registry import DeviceInfo, DeviceEntryType
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
     DOMAIN,
@@ -43,14 +45,14 @@ async def async_setup_entry(
     async_add_entities(entities, True)
 
 
-class SmartHRTBaseSwitch(SwitchEntity):
-    """Classe de base pour les switch SmartHRT"""
+class SmartHRTBaseSwitch(CoordinatorEntity[SmartHRTCoordinator], SwitchEntity):
+    """Classe de base pour les switch SmartHRT (ADR-027: CoordinatorEntity)."""
 
     def __init__(
         self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
     ) -> None:
         """Initialisation de base"""
-        self._coordinator = coordinator
+        super().__init__(coordinator)
         self._config_entry = config_entry
         self._device_id = config_entry.entry_id
         self._device_name = config_entry.data.get(CONF_NAME, "SmartHRT")
@@ -66,21 +68,6 @@ class SmartHRTBaseSwitch(SwitchEntity):
             manufacturer=DEVICE_MANUFACTURER,
             model="Smart Heating Regulator",
         )
-
-    async def async_added_to_hass(self) -> None:
-        """Callback appelé lorsque l'entité est ajoutée à HA"""
-        await super().async_added_to_hass()
-        self._coordinator.register_listener(self._on_coordinator_update)
-
-    async def async_will_remove_from_hass(self) -> None:
-        """Callback appelé lorsque l'entité est retirée de HA"""
-        self._coordinator.unregister_listener(self._on_coordinator_update)
-        await super().async_will_remove_from_hass()
-
-    @callback
-    def _on_coordinator_update(self) -> None:
-        """Callback lors d'une mise à jour du coordinateur"""
-        self.async_write_ha_state()
 
 
 class SmartHRTSmartHeatingSwitch(SmartHRTBaseSwitch):
@@ -99,7 +86,7 @@ class SmartHRTSmartHeatingSwitch(SmartHRTBaseSwitch):
 
     @property
     def is_on(self) -> bool:
-        return self._coordinator.data.smartheating_mode
+        return self.coordinator.data.smartheating_mode
 
     @property
     def icon(self) -> str | None:
@@ -108,12 +95,12 @@ class SmartHRTSmartHeatingSwitch(SmartHRTBaseSwitch):
     async def async_turn_on(self, **kwargs) -> None:
         """Activer le mode chauffage intelligent"""
         _LOGGER.info("SmartHeating mode enabled")
-        self._coordinator.set_smartheating_mode(True)
+        self.coordinator.set_smartheating_mode(True)
 
     async def async_turn_off(self, **kwargs) -> None:
         """Désactiver le mode chauffage intelligent"""
         _LOGGER.info("SmartHeating mode disabled")
-        self._coordinator.set_smartheating_mode(False)
+        self.coordinator.set_smartheating_mode(False)
 
 
 class SmartHRTAdaptiveSwitch(SmartHRTBaseSwitch):
@@ -132,7 +119,7 @@ class SmartHRTAdaptiveSwitch(SmartHRTBaseSwitch):
 
     @property
     def is_on(self) -> bool:
-        return self._coordinator.data.recovery_adaptive_mode
+        return self.coordinator.data.recovery_adaptive_mode
 
     @property
     def icon(self) -> str | None:
@@ -141,9 +128,9 @@ class SmartHRTAdaptiveSwitch(SmartHRTBaseSwitch):
     async def async_turn_on(self, **kwargs) -> None:
         """Activer le mode adaptatif"""
         _LOGGER.info("Adaptive mode enabled")
-        self._coordinator.set_adaptive_mode(True)
+        self.coordinator.set_adaptive_mode(True)
 
     async def async_turn_off(self, **kwargs) -> None:
         """Désactiver le mode adaptatif"""
         _LOGGER.info("Adaptive mode disabled")
-        self._coordinator.set_adaptive_mode(False)
+        self.coordinator.set_adaptive_mode(False)
