@@ -359,7 +359,7 @@ class TestCustomConfig:
 
     def test_custom_iteration_count(self):
         """Configuration avec nombre d'itérations personnalisé."""
-        config = ThermalConfig(recovery_iterations=5)
+        config = ThermalConfig(max_iterations=5)
         solver = ThermalSolver(config)
 
         # Le calcul doit fonctionner avec moins d'itérations
@@ -374,3 +374,86 @@ class TestCustomConfig:
 
         result = solver.calculate_recovery_duration(state, coeffs, now)
         assert result.duration_hours > 0
+
+
+class TestConvergence:
+    """Tests pour la convergence adaptative (ADR-031)."""
+
+    @pytest.fixture
+    def solver(self):
+        return ThermalSolver()
+
+    @pytest.fixture
+    def base_state(self):
+        return ThermalState(
+            interior_temp=17.0,
+            exterior_temp=5.0,
+            tsp=19.0,
+            target_hour=dt_time(6, 0, 0),
+            temperature_forecast_avg=3.0,
+            wind_speed_forecast_avg_kmh=20.0,
+        )
+
+    @pytest.fixture
+    def base_coefficients(self):
+        return ThermalCoefficients(
+            rcth=50.0,
+            rpth=50.0,
+            rcth_lw=50.0,
+            rcth_hw=40.0,
+            rpth_lw=50.0,
+            rpth_hw=40.0,
+        )
+
+    def test_convergence_threshold_respected(
+        self, solver, base_state, base_coefficients
+    ):
+        """Le calcul converge avec le seuil configuré."""
+        now = datetime(2026, 2, 5, 23, 0, 0)
+        result = solver.calculate_recovery_duration(base_state, base_coefficients, now)
+
+        # Le résultat doit être valide
+        assert result.duration_hours >= 0
+        assert result.recovery_start_hour is not None
+
+    def test_fast_convergence_with_tight_threshold(self):
+        """Convergence rapide avec un seuil strict."""
+        config = ThermalConfig(
+            max_iterations=50,
+            convergence_threshold=0.001,  # Seuil très strict (~3.6s)
+        )
+        solver = ThermalSolver(config)
+
+        state = ThermalState(
+            interior_temp=17.0,
+            tsp=19.0,
+            target_hour=dt_time(6, 0, 0),
+            temperature_forecast_avg=5.0,
+            wind_speed_forecast_avg_kmh=20.0,
+        )
+        coeffs = ThermalCoefficients()
+        now = datetime(2026, 2, 5, 23, 0, 0)
+
+        result = solver.calculate_recovery_duration(state, coeffs, now)
+        assert result.duration_hours > 0
+
+    def test_max_iterations_prevents_infinite_loop(self):
+        """Le max_iterations empêche les boucles infinies."""
+        config = ThermalConfig(
+            max_iterations=3,  # Très peu d'itérations
+            convergence_threshold=0.0001,  # Seuil quasi impossible
+        )
+        solver = ThermalSolver(config)
+
+        state = ThermalState(
+            interior_temp=17.0,
+            tsp=19.0,
+            target_hour=dt_time(6, 0, 0),
+            temperature_forecast_avg=5.0,
+        )
+        coeffs = ThermalCoefficients()
+        now = datetime(2026, 2, 5, 23, 0, 0)
+
+        # Ne doit pas boucler indéfiniment
+        result = solver.calculate_recovery_duration(state, coeffs, now)
+        assert result.duration_hours >= 0

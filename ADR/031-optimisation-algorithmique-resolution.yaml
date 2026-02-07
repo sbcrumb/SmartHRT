@@ -1,6 +1,6 @@
 id: 031
 title: "Optimisation algorithmique de la résolution thermique"
-status: "Proposé"
+status: "Accepté"
 date: "2026-02-03"
 context: |
   Le calcul `calculate_recovery_time()` utilise actuellement une boucle itérative
