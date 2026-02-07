@@ -24,8 +24,9 @@ class ThermalConfig:
     wind_low_kmh: float = 10.0  # Vent faible
     wind_high_kmh: float = 60.0  # Vent fort
 
-    # Nombre d'itérations pour le calcul de recovery time (ADR-022)
-    recovery_iterations: int = 20
+    # Paramètres de convergence pour le calcul de recovery time (ADR-031)
+    max_iterations: int = 50  # Maximum d'itérations (ADR-031)
+    convergence_threshold: float = 0.01  # Seuil de convergence en heures (~36s)
 
     # Valeurs par défaut des coefficients
     default_rcth: float = 50.0

@@ -1,18 +1,24 @@
 """Modèle thermique Pure Python pour SmartHRT.
 
 ADR-026: Extraction du modèle thermique en Pure Python.
+ADR-031: Optimisation algorithmique avec convergence adaptative.
 
 Ce module contient la classe ThermalSolver qui implémente tous les calculs
 de physique thermique sans aucune dépendance à Home Assistant:
-- Calcul du temps de relance (ADR-005, ADR-022)
+- Calcul du temps de relance (ADR-005, ADR-022, ADR-031)
 - Interpolation selon le vent (ADR-007)
 - Apprentissage des coefficients (ADR-006)
 - Calcul du windchill
 """
 
+from __future__ import annotations
+
+import logging
 import math
 from datetime import datetime, timedelta, time as dt_time
-from typing import Tuple
+from typing import TYPE_CHECKING, Tuple
+
+_LOGGER = logging.getLogger(__name__)
 
 from .types import (
     ThermalState,
@@ -24,10 +30,11 @@ from .types import (
 
 
 class ThermalSolver:
-    """Solveur thermique Pure Python (ADR-026).
+    """Solveur thermique Pure Python (ADR-026, ADR-031).
 
     Implémente tous les calculs de physique thermique:
     - calculate_recovery_duration: temps nécessaire pour atteindre la consigne
+      avec convergence adaptative (ADR-031)
     - calculate_windchill: température ressentie
     - interpolate_for_wind: interpolation des coefficients selon le vent
     - update_coefficients: apprentissage avec relaxation (ADR-006)
@@ -37,6 +44,8 @@ class ThermalSolver:
 
     Cette classe ne dépend d'aucun élément Home Assistant et peut être
     testée unitairement avec des données synthétiques.
+
+    ADR-031: Optimisation algorithmique avec critère de convergence adaptatif.
     """
 
     def __init__(self, config: ThermalConfig | None = None) -> None:
@@ -135,7 +144,7 @@ class ThermalSolver:
         )
 
     # ─────────────────────────────────────────────────────────────────────────
-    # ADR-005 & ADR-022: Calcul du temps de relance
+    # ADR-005, ADR-022, ADR-031: Calcul du temps de relance
     # ─────────────────────────────────────────────────────────────────────────
 
     def calculate_recovery_duration(
@@ -144,13 +153,15 @@ class ThermalSolver:
         coefficients: ThermalCoefficients,
         now: datetime,
     ) -> RecoveryResult:
-        """Calcule l'heure de démarrage de la relance (ADR-005, ADR-022).
+        """Calcule l'heure de démarrage de la relance (ADR-005, ADR-022, ADR-031).
 
-        Utilise les prévisions météo et 20 itérations pour affiner la prédiction.
-        Le calcul prend en compte:
+        Utilise les prévisions météo et un algorithme itératif avec convergence
+        adaptative pour affiner la prédiction. Le calcul prend en compte:
         - La température intérieure actuelle
         - Les prévisions météo (température, vent)
         - Les coefficients RCth/RPth interpolés selon le vent
+
+        ADR-031: Critère de convergence adaptatif (arrêt précoce si delta < seuil).
 
         Args:
             state: État thermique actuel
@@ -201,8 +212,56 @@ class ThermalSolver:
         except (ValueError, ZeroDivisionError):
             duree_relance = max_duration
 
-        # Prédiction itérative (ADR-022: 20 itérations)
-        for _ in range(self.config.recovery_iterations):
+        # ADR-031: Prédiction itérative avec convergence adaptative
+        duree_relance = self._calculate_with_convergence(
+            tint=tint,
+            text=text,
+            tsp=tsp,
+            rcth=rcth,
+            rpth=rpth,
+            time_remaining=time_remaining,
+            max_duration=max_duration,
+            initial_estimate=duree_relance,
+        )
+
+        recovery_start_hour = target_dt - timedelta(seconds=int(duree_relance * 3600))
+
+        return RecoveryResult(
+            recovery_start_hour=recovery_start_hour,
+            duration_hours=duree_relance,
+        )
+
+    def _calculate_with_convergence(
+        self,
+        tint: float,
+        text: float,
+        tsp: float,
+        rcth: float,
+        rpth: float,
+        time_remaining: float,
+        max_duration: float,
+        initial_estimate: float,
+    ) -> float:
+        """Calcul itératif avec critère de convergence (ADR-031).
+
+        Args:
+            tint: Température intérieure actuelle
+            text: Température extérieure moyenne prévue
+            tsp: Température de consigne
+            rcth: Coefficient RCth interpolé
+            rpth: Coefficient RPth interpolé
+            time_remaining: Temps restant avant target (heures)
+            max_duration: Durée maximale autorisée (heures)
+            initial_estimate: Estimation initiale de la durée
+
+        Returns:
+            Durée de relance calculée avec convergence
+        """
+        duree_relance = initial_estimate
+        prev_estimate = float("inf")
+        converged = False
+
+        for iteration in range(self.config.max_iterations):
             try:
                 # Estimer la température intérieure au moment du démarrage
                 tint_start = text + (tint - text) / math.exp(
@@ -211,19 +270,42 @@ class ThermalSolver:
                 ratio = (rpth + text - tint_start) / (rpth + text - tsp)
                 if ratio > 0.1:
                     # Moyenne pondérée pour éviter les oscillations
-                    duree_relance = min(
+                    new_estimate = min(
                         (duree_relance + 2 * max(rcth * math.log(ratio), 0)) / 3,
                         max_duration,
                     )
+
+                    # ADR-031: Vérifier la convergence
+                    if (
+                        abs(new_estimate - prev_estimate)
+                        < self.config.convergence_threshold
+                    ):
+                        _LOGGER.debug(
+                            "Convergence atteinte en %d itérations (delta=%.4f h)",
+                            iteration + 1,
+                            abs(new_estimate - prev_estimate),
+                        )
+                        converged = True
+                        duree_relance = new_estimate
+                        break
+
+                    prev_estimate = duree_relance
+                    duree_relance = new_estimate
+
             except (ValueError, ZeroDivisionError):
+                _LOGGER.debug(
+                    "Erreur de calcul à l'itération %d, arrêt anticipé", iteration + 1
+                )
                 break
 
-        recovery_start_hour = target_dt - timedelta(seconds=int(duree_relance * 3600))
+        if not converged:
+            _LOGGER.warning(
+                "Max itérations (%d) atteint sans convergence (threshold=%.3f h)",
+                self.config.max_iterations,
+                self.config.convergence_threshold,
+            )
 
-        return RecoveryResult(
-            recovery_start_hour=recovery_start_hour,
-            duration_hours=duree_relance,
-        )
+        return duree_relance
 
     def calculate_recovery_update_time(
         self,
