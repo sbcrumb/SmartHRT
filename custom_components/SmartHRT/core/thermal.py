@@ -503,6 +503,7 @@ class ThermalSolver:
 
     # ─────────────────────────────────────────────────────────────────────────
     # ADR-006: Apprentissage des coefficients avec relaxation
+    # ADR-044: Protection contre les valeurs aberrantes (outliers)
     # ─────────────────────────────────────────────────────────────────────────
 
     def update_coefficients(
@@ -515,12 +516,13 @@ class ThermalSolver:
         wind_kmh: float,
         relaxation_factor: float,
     ) -> CoefficientUpdateResult:
-        """Met à jour les coefficients avec relaxation (ADR-006).
+        """Met à jour les coefficients avec relaxation (ADR-006) et protection outliers (ADR-044).
 
         Ce calcul:
-        1. Calcule l'erreur entre valeur mesurée et interpolée
-        2. Applique une formule de mise à jour pour rcth_lw/hw ou rpth_lw/hw
-        3. Utilise la relaxation pour éviter les oscillations
+        1. Vérifie si la valeur calculée est un outlier (ADR-044)
+        2. Calcule l'erreur entre valeur mesurée et interpolée
+        3. Applique une formule de mise à jour pour rcth_lw/hw ou rpth_lw/hw
+        4. Utilise la relaxation pour éviter les oscillations
 
         Args:
             coef_type: Type de coefficient ("rcth" ou "rpth")
@@ -538,6 +540,57 @@ class ThermalSolver:
         wind_high = self.config.wind_high_kmh
         coef_min = self.config.coef_min
         coef_max = self.config.coef_max
+
+        # ADR-044: Protection contre les valeurs aberrantes
+        outlier_detected = False
+        outlier_clamped = False
+        original_calculated = calculated_value
+
+        if current_main > 0:
+            deviation_percent = (
+                abs(calculated_value - current_main) / current_main * 100
+            )
+
+            if deviation_percent > self.config.outlier_threshold_percent:
+                outlier_detected = True
+                self._logger.warning(
+                    "Outlier détecté pour %s: calculé=%.2f, actuel=%.2f (écart=%.1f%%)",
+                    coef_type,
+                    calculated_value,
+                    current_main,
+                    deviation_percent,
+                )
+
+                if self.config.outlier_mode == "reject":
+                    # Mode reject: ignorer complètement la mise à jour
+                    self._logger.info(
+                        "Mise à jour rejetée pour %s (mode reject)", coef_type
+                    )
+                    return CoefficientUpdateResult(
+                        coef_lw=current_lw,
+                        coef_hw=current_hw,
+                        coef_main=current_main,
+                        error=0.0,
+                        outlier_detected=True,
+                        outlier_clamped=False,
+                        original_calculated=original_calculated,
+                    )
+                else:
+                    # Mode clamp: plafonner la valeur
+                    threshold = self.config.outlier_threshold_percent / 100
+                    max_allowed = current_main * (1 + threshold)
+                    min_allowed = current_main * (1 - threshold)
+                    calculated_value = max(
+                        min_allowed, min(max_allowed, calculated_value)
+                    )
+                    outlier_clamped = True
+                    self._logger.info(
+                        "Valeur plafonnée à %.2f pour %s (min=%.2f, max=%.2f)",
+                        calculated_value,
+                        coef_type,
+                        min_allowed,
+                        max_allowed,
+                    )
 
         # Position relative du vent entre les bornes (centré sur 0)
         x = (wind_kmh - wind_low) / (wind_high - wind_low) - 0.5
@@ -578,4 +631,7 @@ class ThermalSolver:
             coef_hw=new_hw,
             coef_main=max(coef_min, new_main),
             error=round(err, 3),
+            outlier_detected=outlier_detected,
+            outlier_clamped=outlier_clamped,
+            original_calculated=original_calculated if outlier_detected else None,
         )

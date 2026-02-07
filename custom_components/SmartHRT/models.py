@@ -182,6 +182,26 @@ class ConfigFlowDataModel(BaseModel):
             pass  # Les erreurs de parsing sont gérées par validate_time_format
         return self
 
+    @property
+    def target_hour_as_time(self) -> dt_time:
+        """Convertit target_hour en objet time (ADR-045)."""
+        parts = self.target_hour.split(":")
+        return dt_time(
+            int(parts[0]),
+            int(parts[1]) if len(parts) > 1 else 0,
+            int(parts[2]) if len(parts) > 2 else 0,
+        )
+
+    @property
+    def recoverycalc_hour_as_time(self) -> dt_time:
+        """Convertit recoverycalc_hour en objet time (ADR-045)."""
+        parts = self.recoverycalc_hour.split(":")
+        return dt_time(
+            int(parts[0]),
+            int(parts[1]) if len(parts) > 1 else 0,
+            int(parts[2]) if len(parts) > 2 else 0,
+        )
+
 
 def validate_persisted_data(data: dict[str, Any]) -> dict[str, Any]:
     """Valide et normalise les données persistées.

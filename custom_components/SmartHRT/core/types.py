@@ -38,6 +38,10 @@ class ThermalConfig:
     coef_min: float = 0.1
     coef_max: float = 19999.0
 
+    # ADR-044: Protection contre les valeurs aberrantes (outliers)
+    outlier_threshold_percent: float = 50.0  # Écart max autorisé en %
+    outlier_mode: str = "clamp"  # "clamp" (plafonnement) ou "reject" (ignorer)
+
 
 @dataclass
 class ThermalCoefficients:
@@ -142,6 +146,10 @@ class CoefficientUpdateResult:
     coef_main: float
     # Erreur observée (pour diagnostic)
     error: float
+    # ADR-044: Traçage des outliers
+    outlier_detected: bool = False  # True si outlier détecté
+    outlier_clamped: bool = False  # True si valeur plafonnée
+    original_calculated: float | None = None  # Valeur avant plafonnement
 
 
 class Action(StrEnum):

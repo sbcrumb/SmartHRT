@@ -14,7 +14,12 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Callable
 
-from homeassistant.const import UnitOfTemperature, UnitOfSpeed, UnitOfTime
+from homeassistant.const import (
+    UnitOfTemperature,
+    UnitOfSpeed,
+    UnitOfTime,
+    EntityCategory,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -25,7 +30,6 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.helpers.device_registry import DeviceInfo, DeviceEntryType
-from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
@@ -279,7 +283,7 @@ class SmartHRTBaseSensor(CoordinatorEntity[SmartHRTCoordinator], SensorEntity):
 
 class SmartHRTNightStateSensor(SmartHRTBaseSensor):
     """Sensor indiquant si c'est la nuit (soleil sous l'horizon).
-    
+
     Ce sensor accède à l'entité externe sun.sun, donc non-factorisable.
     """
 
@@ -301,7 +305,9 @@ class SmartHRTNightStateSensor(SmartHRTBaseSensor):
 
     @property
     def icon(self) -> str | None:
-        return "mdi:weather-night" if self.native_value == 1 else "mdi:white-balance-sunny"
+        return (
+            "mdi:weather-night" if self.native_value == 1 else "mdi:white-balance-sunny"
+        )
 
 
 class SmartHRTStateSensor(SmartHRTBaseSensor):
@@ -343,20 +349,10 @@ class SmartHRTStateSensor(SmartHRTBaseSensor):
         state = self.coordinator.data.current_state
         return self.STATE_ICONS.get(state, "mdi:state-machine")
 
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        state = self.coordinator.data.current_state
-        return {
-            "state_label": self.STATE_LABELS.get(state, state),
-            "recovery_calc_mode": self.coordinator.data.recovery_calc_mode,
-            "rp_calc_mode": self.coordinator.data.rp_calc_mode,
-            "temp_lag_detection_active": self.coordinator.data.temp_lag_detection_active,
-        }
-
 
 class SmartHRTTimeToRecoverySensor(SmartHRTBaseSensor):
     """Sensor de la durée restante avant la relance.
-    
+
     Appelle une méthode du coordinator, non-factorisable directement.
     """
 
@@ -523,15 +519,17 @@ async def async_setup_entry(
     ]
 
     # Sensors spéciaux avec logique non-factorisable
-    entities.extend([
-        SmartHRTNightStateSensor(coordinator, entry),
-        SmartHRTStateSensor(coordinator, entry),
-        SmartHRTTimeToRecoverySensor(coordinator, entry),
-        SmartHRTInstanceInfoSensor(coordinator, entry),
-        # Sensors timestamp
-        SmartHRTRecoveryStartTimestampSensor(coordinator, entry),
-        SmartHRTTargetHourTimestampSensor(coordinator, entry),
-        SmartHRTRecoveryCalcHourTimestampSensor(coordinator, entry),
-    ])
+    entities.extend(
+        [
+            SmartHRTNightStateSensor(coordinator, entry),
+            SmartHRTStateSensor(coordinator, entry),
+            SmartHRTTimeToRecoverySensor(coordinator, entry),
+            SmartHRTInstanceInfoSensor(coordinator, entry),
+            # Sensors timestamp
+            SmartHRTRecoveryStartTimestampSensor(coordinator, entry),
+            SmartHRTTargetHourTimestampSensor(coordinator, entry),
+            SmartHRTRecoveryCalcHourTimestampSensor(coordinator, entry),
+        ]
+    )
 
     async_add_entities(entities, True)

@@ -15,31 +15,23 @@ from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from .const import (
     DOMAIN,
     DATA_COORDINATOR,
-    SERVICE_CALCULATE_RECOVERY_TIME,
-    SERVICE_CALCULATE_RECOVERY_UPDATE_TIME,
-    SERVICE_CALCULATE_RCTH_FAST,
-    SERVICE_ON_HEATING_STOP,
-    SERVICE_ON_RECOVERY_START,
-    SERVICE_ON_RECOVERY_END,
+    SERVICE_START_HEATING_CYCLE,
+    SERVICE_STOP_HEATING,
+    SERVICE_START_RECOVERY,
+    SERVICE_END_RECOVERY,
+    SERVICE_GET_STATE,
     SERVICE_RESET_LEARNING,
     SERVICE_TRIGGER_CALCULATION,
 )
-
-# Nouveaux services simplifiés
-SERVICE_START_HEATING_CYCLE = "start_heating_cycle"
-SERVICE_STOP_HEATING = "stop_heating"
-SERVICE_START_RECOVERY = "start_recovery"
-SERVICE_END_RECOVERY = "end_recovery"
-SERVICE_GET_STATE = "get_state"
 
 _LOGGER = logging.getLogger(__name__)
 
 # Clé pour stocker le flag d'enregistrement des services
 DATA_SERVICES_REGISTERED = "services_registered"
 
-# Liste des services disponibles
+# ADR-043: Liste des services essentiels uniquement
 SERVICES = [
-    # Services simplifiés (recommandés)
+    # Services simplifiés
     SERVICE_START_HEATING_CYCLE,
     SERVICE_STOP_HEATING,
     SERVICE_START_RECOVERY,
@@ -48,13 +40,6 @@ SERVICES = [
     # Services utilitaires
     SERVICE_RESET_LEARNING,
     SERVICE_TRIGGER_CALCULATION,
-    # Services historiques (conservés pour compatibilité)
-    SERVICE_CALCULATE_RECOVERY_TIME,
-    SERVICE_CALCULATE_RECOVERY_UPDATE_TIME,
-    SERVICE_CALCULATE_RCTH_FAST,
-    SERVICE_ON_HEATING_STOP,
-    SERVICE_ON_RECOVERY_START,
-    SERVICE_ON_RECOVERY_END,
 ]
 
 
@@ -126,128 +111,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
     schema = vol.Schema({vol.Optional("entry_id"): str})
 
-    async def handle_calculate_recovery_time(call: ServiceCall) -> dict[str, Any]:
-        entry_id = call.data.get("entry_id")
-        coord = _get_coordinator(hass, entry_id)
-        if not coord:
-            error_msg = (
-                f"Coordinateur non trouvé pour entry_id={entry_id}"
-                if entry_id
-                else "Aucun coordinateur SmartHRT disponible"
-            )
-            _LOGGER.error(error_msg)
-            return {"success": False, "error": error_msg}
-        coord.calculate_recovery_time()
-        return {
-            "recovery_start_hour": (
-                coord.data.recovery_start_hour.isoformat()
-                if coord.data.recovery_start_hour
-                else None
-            ),
-            "success": True,
-        }
-
-    async def handle_calculate_recovery_update_time(
-        call: ServiceCall,
-    ) -> dict[str, Any]:
-        entry_id = call.data.get("entry_id")
-        coord = _get_coordinator(hass, entry_id)
-        if not coord:
-            error_msg = (
-                f"Coordinateur non trouvé pour entry_id={entry_id}"
-                if entry_id
-                else "Aucun coordinateur SmartHRT disponible"
-            )
-            _LOGGER.error(error_msg)
-            return {"success": False, "error": error_msg}
-        result = coord.calculate_recovery_update_time()
-        if result:
-            coord.data.recovery_update_hour = result
-            coord._schedule_recovery_update(result)
-            coord._notify_listeners()
-        return {
-            "recovery_update_hour": result.isoformat() if result else None,
-            "success": True,
-        }
-
-    async def handle_calculate_rcth_fast(call: ServiceCall) -> dict[str, Any]:
-        entry_id = call.data.get("entry_id")
-        coord = _get_coordinator(hass, entry_id)
-        if not coord:
-            error_msg = (
-                f"Coordinateur non trouvé pour entry_id={entry_id}"
-                if entry_id
-                else "Aucun coordinateur SmartHRT disponible"
-            )
-            _LOGGER.error(error_msg)
-            return {"success": False, "error": error_msg}
-        coord.calculate_rcth_fast()
-        return {"rcth_fast": coord.data.rcth_fast, "success": True}
-
-    async def handle_on_heating_stop(call: ServiceCall) -> dict[str, Any]:
-        entry_id = call.data.get("entry_id")
-        coord = _get_coordinator(hass, entry_id)
-        if not coord:
-            error_msg = (
-                f"Coordinateur non trouvé pour entry_id={entry_id}"
-                if entry_id
-                else "Aucun coordinateur SmartHRT disponible"
-            )
-            _LOGGER.error(error_msg)
-            return {"success": False, "error": error_msg}
-        coord.on_heating_stop()
-        return {
-            "time_recovery_calc": (
-                coord.data.time_recovery_calc.isoformat()
-                if coord.data.time_recovery_calc
-                else None
-            ),
-            "success": True,
-        }
-
-    async def handle_on_recovery_start(call: ServiceCall) -> dict[str, Any]:
-        entry_id = call.data.get("entry_id")
-        coord = _get_coordinator(hass, entry_id)
-        if not coord:
-            error_msg = (
-                f"Coordinateur non trouvé pour entry_id={entry_id}"
-                if entry_id
-                else "Aucun coordinateur SmartHRT disponible"
-            )
-            _LOGGER.error(error_msg)
-            return {"success": False, "error": error_msg}
-        coord.on_recovery_start()
-        return {
-            "time_recovery_start": (
-                coord.data.time_recovery_start.isoformat()
-                if coord.data.time_recovery_start
-                else None
-            ),
-            "rcth_calculated": coord.data.rcth_calculated,
-            "success": True,
-        }
-
-    async def handle_on_recovery_end(call: ServiceCall) -> dict[str, Any]:
-        entry_id = call.data.get("entry_id")
-        coord = _get_coordinator(hass, entry_id)
-        if not coord:
-            error_msg = (
-                f"Coordinateur non trouvé pour entry_id={entry_id}"
-                if entry_id
-                else "Aucun coordinateur SmartHRT disponible"
-            )
-            _LOGGER.error(error_msg)
-            return {"success": False, "error": error_msg}
-        coord.on_recovery_end()
-        return {
-            "time_recovery_end": (
-                coord.data.time_recovery_end.isoformat()
-                if coord.data.time_recovery_end
-                else None
-            ),
-            "rpth_calculated": coord.data.rpth_calculated,
-            "success": True,
-        }
+    # ADR-043: Handlers supprimés - calculate_recovery_time, calculate_recovery_update_time,
+    # calculate_rcth_fast, on_heating_stop, on_recovery_start, on_recovery_end
 
     async def handle_reset_learning(call: ServiceCall) -> dict[str, Any]:
         """Reset all learned thermal coefficients to defaults."""
@@ -275,7 +140,10 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         }
 
     async def handle_trigger_calculation(call: ServiceCall) -> dict[str, Any]:
-        """Manually trigger a recovery time calculation."""
+        """Manually trigger a recovery time calculation.
+
+        ADR-042: Utilise la méthode façade async_trigger_calculation.
+        """
         entry_id = call.data.get("entry_id")
         coord = _get_coordinator(hass, entry_id)
         if not coord:
@@ -287,22 +155,14 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             _LOGGER.error(error_msg)
             return {"success": False, "error": error_msg}
 
-        await hass.async_add_executor_job(coord.calculate_recovery_time)
-        coord._notify_listeners()
+        return await coord.async_trigger_calculation()
 
-        return {
-            "recovery_start_hour": (
-                coord.data.recovery_start_hour.isoformat()
-                if coord.data.recovery_start_hour
-                else None
-            ),
-            "time_to_recovery_hours": coord.get_time_to_recovery_hours(),
-            "success": True,
-        }
-
-    # Nouveaux handlers simplifiés
+    # Nouveaux handlers simplifiés (ADR-042: utilisent les méthodes façade)
     async def handle_start_heating_cycle(call: ServiceCall) -> dict[str, Any]:
-        """Démarre un nouveau cycle de chauffage (HEATING_ON)."""
+        """Démarre un nouveau cycle de chauffage (HEATING_ON).
+
+        ADR-042: Utilise la méthode façade async_manual_stop_heating.
+        """
         entry_id = call.data.get("entry_id")
         coord = _get_coordinator(hass, entry_id)
         if not coord:
@@ -314,26 +174,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             _LOGGER.error(error_msg)
             return {"success": False, "error": error_msg}
 
-        # ADR-028: Forcer l'état via force_state() pour traçabilité
-        from .coordinator import SmartHRTState
-
-        coord.force_state(SmartHRTState.HEATING_ON)
-        coord.data.rp_calc_mode = False
-        coord.data.recovery_calc_mode = False
-        coord.data.temp_lag_detection_active = False
-        coord._notify_listeners()
-        await coord._save_learned_data()
-
-        _LOGGER.info("%s Cycle de chauffage démarré manuellement", coord._log_prefix())
-
-        return {
-            "success": True,
-            "state": str(coord.data.current_state),
-            "message": "Cycle de chauffage démarré",
-        }
+        return await coord.async_manual_stop_heating()
 
     async def handle_stop_heating(call: ServiceCall) -> dict[str, Any]:
-        """Arrête le chauffage et démarre la surveillance (DETECTING_LAG → MONITORING)."""
+        """Arrête le chauffage et démarre la surveillance (DETECTING_LAG → MONITORING).
+
+        ADR-042: Utilise la méthode façade async_start_heating_cycle.
+        """
         entry_id = call.data.get("entry_id")
         coord = _get_coordinator(hass, entry_id)
         if not coord:
@@ -345,22 +192,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             _LOGGER.error(error_msg)
             return {"success": False, "error": error_msg}
 
-        # Appel à la méthode _on_recoverycalc_hour qui gère la transition proprement
-        await coord._on_recoverycalc_hour(None)
-
-        return {
-            "success": True,
-            "state": str(coord.data.current_state),
-            "recovery_start_hour": (
-                coord.data.recovery_start_hour.isoformat()
-                if coord.data.recovery_start_hour
-                else None
-            ),
-            "message": "Chauffage arrêté, surveillance démarrée",
-        }
+        return await coord.async_start_heating_cycle()
 
     async def handle_start_recovery(call: ServiceCall) -> dict[str, Any]:
-        """Démarre la relance de chauffage (RECOVERY → HEATING_PROCESS)."""
+        """Démarre la relance de chauffage (RECOVERY → HEATING_PROCESS).
+
+        ADR-042: Utilise la méthode façade async_manual_start_recovery.
+        """
         entry_id = call.data.get("entry_id")
         coord = _get_coordinator(hass, entry_id)
         if not coord:
@@ -372,22 +210,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             _LOGGER.error(error_msg)
             return {"success": False, "error": error_msg}
 
-        coord.on_recovery_start()
-
-        return {
-            "success": True,
-            "state": str(coord.data.current_state),
-            "time_recovery_start": (
-                coord.data.time_recovery_start.isoformat()
-                if coord.data.time_recovery_start
-                else None
-            ),
-            "rcth_calculated": coord.data.rcth_calculated,
-            "message": "Relance démarrée",
-        }
+        return await coord.async_manual_start_recovery()
 
     async def handle_end_recovery(call: ServiceCall) -> dict[str, Any]:
-        """Termine la relance de chauffage (HEATING_PROCESS → HEATING_ON)."""
+        """Termine la relance de chauffage (HEATING_PROCESS → HEATING_ON).
+
+        ADR-042: Utilise la méthode façade async_manual_end_recovery.
+        """
         entry_id = call.data.get("entry_id")
         coord = _get_coordinator(hass, entry_id)
         if not coord:
@@ -399,22 +228,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             _LOGGER.error(error_msg)
             return {"success": False, "error": error_msg}
 
-        coord.on_recovery_end()
-
-        return {
-            "success": True,
-            "state": str(coord.data.current_state),
-            "time_recovery_end": (
-                coord.data.time_recovery_end.isoformat()
-                if coord.data.time_recovery_end
-                else None
-            ),
-            "rpth_calculated": coord.data.rpth_calculated,
-            "message": "Relance terminée",
-        }
+        return await coord.async_manual_end_recovery()
 
     async def handle_get_state(call: ServiceCall) -> dict[str, Any]:
-        """Retourne l'état actuel de la machine à états avec détails."""
+        """Retourne l'état actuel de la machine à états avec détails.
+
+        ADR-042: Utilise la méthode façade get_state_dict.
+        """
         entry_id = call.data.get("entry_id")
         coord = _get_coordinator(hass, entry_id)
         if not coord:
@@ -426,30 +246,11 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             _LOGGER.error(error_msg)
             return {"success": False, "error": error_msg}
 
-        return {
-            "success": True,
-            "state": str(coord.data.current_state),
-            "smartheating_mode": coord.data.smartheating_mode,
-            "recovery_calc_mode": coord.data.recovery_calc_mode,
-            "rp_calc_mode": coord.data.rp_calc_mode,
-            "temp_lag_detection_active": coord.data.temp_lag_detection_active,
-            "interior_temp": coord.data.interior_temp,
-            "exterior_temp": coord.data.exterior_temp,
-            "target_hour": coord.data.target_hour.isoformat(),
-            "recoverycalc_hour": coord.data.recoverycalc_hour.isoformat(),
-            "recovery_start_hour": (
-                coord.data.recovery_start_hour.isoformat()
-                if coord.data.recovery_start_hour
-                else None
-            ),
-            "time_to_recovery_hours": coord.get_time_to_recovery_hours(),
-            "rcth": coord.data.rcth,
-            "rpth": coord.data.rpth,
-        }
+        return coord.get_state_dict()
 
-    # Mapping des services vers leurs handlers
+    # ADR-043: Mapping des services essentiels uniquement (7 services)
     handlers = {
-        # Services simplifiés (recommandés)
+        # Services simplifiés
         SERVICE_START_HEATING_CYCLE: handle_start_heating_cycle,
         SERVICE_STOP_HEATING: handle_stop_heating,
         SERVICE_START_RECOVERY: handle_start_recovery,
@@ -458,13 +259,6 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         # Services utilitaires
         SERVICE_RESET_LEARNING: handle_reset_learning,
         SERVICE_TRIGGER_CALCULATION: handle_trigger_calculation,
-        # Services historiques (conservés pour compatibilité)
-        SERVICE_CALCULATE_RECOVERY_TIME: handle_calculate_recovery_time,
-        SERVICE_CALCULATE_RECOVERY_UPDATE_TIME: handle_calculate_recovery_update_time,
-        SERVICE_CALCULATE_RCTH_FAST: handle_calculate_rcth_fast,
-        SERVICE_ON_HEATING_STOP: handle_on_heating_stop,
-        SERVICE_ON_RECOVERY_START: handle_on_recovery_start,
-        SERVICE_ON_RECOVERY_END: handle_on_recovery_end,
     }
 
     # Enregistrer les services

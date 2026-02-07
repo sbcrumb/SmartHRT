@@ -4,6 +4,7 @@ Implements:
 - ADR-033: Decoupled state transition logic
 - ADR-034: Centralized side effects via Actions
 - ADR-035: Atomic transitions with validation
+- ADR-046: Declarative transition-to-actions mapping
 """
 
 from __future__ import annotations
@@ -52,6 +53,35 @@ VALID_TRANSITIONS: dict[SmartHRTState, set[SmartHRTState]] = {
     SmartHRTState.MONITORING: {SmartHRTState.RECOVERY, SmartHRTState.HEATING_PROCESS},
     SmartHRTState.RECOVERY: {SmartHRTState.HEATING_PROCESS},
     SmartHRTState.HEATING_PROCESS: {SmartHRTState.HEATING_ON},
+}
+
+# ADR-046: Mapping déclaratif transition → actions
+# Ordre recommandé: Snapshots, Annulation timers, Calculs, Planification, Sauvegarde
+TRANSITION_ACTIONS: dict[tuple[SmartHRTState, SmartHRTState], list[Action]] = {
+    # HEATING_ON → DETECTING_LAG: Démarrage du cycle, pas d'action spécifique
+    (SmartHRTState.HEATING_ON, SmartHRTState.DETECTING_LAG): [],
+    # DETECTING_LAG → MONITORING: Planifier la mise à jour recovery
+    (SmartHRTState.DETECTING_LAG, SmartHRTState.MONITORING): [
+        Action.SCHEDULE_RECOVERY_UPDATE,
+        Action.SAVE_DATA,
+    ],
+    # MONITORING → RECOVERY: Démarrage de la relance
+    (SmartHRTState.MONITORING, SmartHRTState.RECOVERY): [
+        Action.CANCEL_RECOVERY_TIMER,
+        Action.SNAPSHOT_RECOVERY_START,
+        Action.CALCULATE_RCTH,
+        Action.SAVE_DATA,
+    ],
+    # MONITORING → HEATING_PROCESS: Cas où target atteinte sans recovery
+    (SmartHRTState.MONITORING, SmartHRTState.HEATING_PROCESS): [],
+    # RECOVERY → HEATING_PROCESS: Transition naturelle
+    (SmartHRTState.RECOVERY, SmartHRTState.HEATING_PROCESS): [],
+    # HEATING_PROCESS → HEATING_ON: Fin du cycle, calcul RPth
+    (SmartHRTState.HEATING_PROCESS, SmartHRTState.HEATING_ON): [
+        Action.SNAPSHOT_RECOVERY_END,
+        Action.CALCULATE_RPTH,
+        Action.SAVE_DATA,
+    ],
 }
 
 StateTransitionCallback = Callable[[SmartHRTState, SmartHRTState], None]

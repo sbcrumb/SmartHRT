@@ -89,6 +89,7 @@ from .core import (
     SmartHRTState,
     SmartHRTStateMachine,
     VALID_TRANSITIONS,
+    TRANSITION_ACTIONS,
     # ADR-040: get_state_flags n'est plus utilisé, flags sont des propriétés calculées
 )
 
@@ -791,25 +792,11 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
             ),
         )
 
-        # ADR-033/034: Machine à états avec actions configurées
-        transition_actions = {
-            (SmartHRTState.MONITORING, SmartHRTState.RECOVERY): [
-                Action.CANCEL_RECOVERY_TIMER,
-                Action.SNAPSHOT_RECOVERY_START,
-                Action.CALCULATE_RCTH,
-                Action.SAVE_DATA,
-            ],
-            (SmartHRTState.HEATING_PROCESS, SmartHRTState.HEATING_ON): [
-                Action.SNAPSHOT_RECOVERY_END,
-                Action.CALCULATE_RPTH,
-                Action.SAVE_DATA,
-            ],
-        }
-
+        # ADR-033/034/046: Machine à états avec actions déclaratives
         log_prefix = f"[{self.data.name}#{entry.entry_id[:8]}]"
         self._state_machine = SmartHRTStateMachine(
             self.data.current_state,
-            transition_actions=transition_actions,
+            transition_actions=TRANSITION_ACTIONS,
             logger=_LOGGER,
             log_prefix=log_prefix,
         )
@@ -1050,7 +1037,11 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
     # ─────────────────────────────────────────────────────────────────────────
 
     async def async_setup(self) -> None:
-        """Configuration asynchrone du coordinateur"""
+        """Configuration asynchrone du coordinateur.
+
+        PERF: Les opérations bloquantes (météo, calculs) sont différées
+        via async_create_task pour ne pas bloquer le setup de l'entrée.
+        """
         _LOGGER.debug(
             "%s Configuration - TSP=%.1f°C, target_hour=%s, recoverycalc_hour=%s",
             self._log_prefix(),
@@ -1059,15 +1050,18 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
             self.data.recoverycalc_hour,
         )
 
-        # Restore learned coefficients from storage
+        # Restore learned coefficients from storage (rapide, lecture locale)
         await self._restore_learned_data()
 
         await self._update_initial_states()
         self._setup_listeners()
         self._setup_time_triggers()
 
-        # Différer l'initialisation météo après le démarrage complet de HA
-        # si l'entité météo n'est pas encore disponible
+        # Restaurer les triggers selon l'état (ne dépend pas de la météo)
+        await self._restore_state_after_restart()
+
+        # PERF: Différer l'initialisation météo pour ne pas bloquer le setup
+        # Les opérations météo (service calls) peuvent prendre >1s
         if self._weather_entity_id:
             weather = self.hass.states.get(self._weather_entity_id)
             if weather is None:
@@ -1081,14 +1075,17 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
                     EVENT_HOMEASSISTANT_STARTED, self._on_homeassistant_started
                 )
             else:
-                # Entité météo déjà disponible, initialisation immédiate
-                await self._complete_weather_setup()
+                # Entité météo disponible - lancer en tâche de fond (non-bloquant)
+                self.hass.async_create_task(
+                    self._complete_weather_setup(),
+                    name=f"SmartHRT {self.data.name} weather setup",
+                )
         else:
-            # Pas d'entité météo configurée
-            await self._complete_weather_setup()
-
-        # Restaurer les triggers et tâches périodiques selon l'état de la machine
-        await self._restore_state_after_restart()
+            # Pas d'entité météo configurée - setup minimal en tâche de fond
+            self.hass.async_create_task(
+                self._complete_weather_setup(),
+                name=f"SmartHRT {self.data.name} weather setup",
+            )
 
     async def _on_homeassistant_started(self, event: Event) -> None:
         """Callback appelé après le démarrage complet de Home Assistant.
@@ -2331,6 +2328,151 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
     def _on_recovery_end(self) -> None:
         """Ancienne méthode interne - redirige vers on_recovery_end"""
         self.on_recovery_end()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # ADR-042: Méthodes Façade pour les services
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def async_manual_stop_heating(self) -> dict[str, Any]:
+        """Arrêt manuel du chauffage - méthode façade pour les services (ADR-042).
+
+        Encapsule:
+        - Transition vers HEATING_ON
+        - Réinitialisation des flags via la machine à états
+        - Annulation des timers en cours
+        - Sauvegarde des données
+        """
+        # Annuler les timers
+        self._cancel_recovery_start_timer()
+        if self._unsub_recovery_update:
+            self._unsub_recovery_update()
+            self._unsub_recovery_update = None
+
+        # Transition vers HEATING_ON
+        if not self.transition_to(SmartHRTState.HEATING_ON):
+            self.force_state(SmartHRTState.HEATING_ON)
+
+        await self._save_learned_data()
+        self.async_set_updated_data(self.data)
+
+        _LOGGER.info("%s Arrêt manuel du chauffage effectué", self._log_prefix())
+
+        return {
+            "success": True,
+            "state": str(self.data.current_state),
+            "message": "Chauffage arrêté et réinitialisé",
+        }
+
+    async def async_start_heating_cycle(self) -> dict[str, Any]:
+        """Démarrage d'un nouveau cycle de chauffage - méthode façade (ADR-042).
+
+        Équivalent à l'appel de recoverycalc_hour.
+        """
+        await self._async_on_recoverycalc_hour()
+
+        _LOGGER.info(
+            "%s Nouveau cycle de chauffage démarré manuellement", self._log_prefix()
+        )
+
+        return {
+            "success": True,
+            "state": str(self.data.current_state),
+            "recovery_start_hour": (
+                self.data.recovery_start_hour.isoformat()
+                if self.data.recovery_start_hour
+                else None
+            ),
+            "message": "Cycle de chauffage démarré",
+        }
+
+    async def async_manual_start_recovery(self) -> dict[str, Any]:
+        """Démarrage manuel de la relance - méthode façade (ADR-042).
+
+        Encapsule:
+        - Appel à on_recovery_start()
+        - Sauvegarde des données
+        """
+        self.on_recovery_start()
+        await self._save_learned_data()
+
+        _LOGGER.info("%s Relance démarrée manuellement", self._log_prefix())
+
+        return {
+            "success": True,
+            "state": str(self.data.current_state),
+            "time_recovery_start": (
+                self.data.time_recovery_start.isoformat()
+                if self.data.time_recovery_start
+                else None
+            ),
+            "rcth_calculated": self.data.rcth_calculated,
+            "message": "Relance démarrée",
+        }
+
+    async def async_manual_end_recovery(self) -> dict[str, Any]:
+        """Fin manuelle de la relance - méthode façade (ADR-042).
+
+        Encapsule:
+        - Appel à on_recovery_end()
+        - Sauvegarde des données
+        """
+        self.on_recovery_end()
+        await self._save_learned_data()
+
+        _LOGGER.info("%s Relance terminée manuellement", self._log_prefix())
+
+        return {
+            "success": True,
+            "state": str(self.data.current_state),
+            "time_recovery_end": (
+                self.data.time_recovery_end.isoformat()
+                if self.data.time_recovery_end
+                else None
+            ),
+            "rpth_calculated": self.data.rpth_calculated,
+            "message": "Relance terminée",
+        }
+
+    def get_state_dict(self) -> dict[str, Any]:
+        """Retourne l'état complet du coordinateur - méthode façade (ADR-042).
+
+        Utilisée par le service get_state.
+        """
+        return {
+            "success": True,
+            "state": str(self.data.current_state),
+            "smartheating_mode": self.data.smartheating_mode,
+            "recovery_calc_mode": self.data.recovery_calc_mode,
+            "rp_calc_mode": self.data.rp_calc_mode,
+            "temp_lag_detection_active": self.data.temp_lag_detection_active,
+            "interior_temp": self.data.interior_temp,
+            "exterior_temp": self.data.exterior_temp,
+            "target_hour": self.data.target_hour.isoformat(),
+            "recoverycalc_hour": self.data.recoverycalc_hour.isoformat(),
+            "recovery_start_hour": (
+                self.data.recovery_start_hour.isoformat()
+                if self.data.recovery_start_hour
+                else None
+            ),
+            "time_to_recovery_hours": self.get_time_to_recovery_hours(),
+            "rcth": self.data.rcth,
+            "rpth": self.data.rpth,
+        }
+
+    async def async_trigger_calculation(self) -> dict[str, Any]:
+        """Force un recalcul du temps de relance - méthode façade (ADR-042)."""
+        await self.hass.async_add_executor_job(self.calculate_recovery_time)
+        self._notify_listeners()
+
+        return {
+            "success": True,
+            "recovery_start_hour": (
+                self.data.recovery_start_hour.isoformat()
+                if self.data.recovery_start_hour
+                else None
+            ),
+            "time_to_recovery_hours": self.get_time_to_recovery_hours(),
+        }
 
     # ─────────────────────────────────────────────────────────────────────────
     # ADR-036: Méthode générique pour setters

@@ -49,24 +49,17 @@ DEVICE_MANUFACTURER = "SmartHRT"
 # Data keys for hass.data[DOMAIN][entry_id]
 DATA_COORDINATOR = "coordinator"
 
-# Service names - Nouveaux services simplifiés
+# ADR-043: Services essentiels uniquement
+# Services simplifiés
 SERVICE_START_HEATING_CYCLE = "start_heating_cycle"
 SERVICE_STOP_HEATING = "stop_heating"
 SERVICE_START_RECOVERY = "start_recovery"
 SERVICE_END_RECOVERY = "end_recovery"
 SERVICE_GET_STATE = "get_state"
 
-# Service names - Services utilitaires
+# Services utilitaires
 SERVICE_RESET_LEARNING = "reset_learning"
 SERVICE_TRIGGER_CALCULATION = "trigger_calculation"
-
-# Service names - Services historiques (conservés pour compatibilité)
-SERVICE_CALCULATE_RECOVERY_TIME = "calculate_recovery_time"
-SERVICE_CALCULATE_RECOVERY_UPDATE_TIME = "calculate_recovery_update_time"
-SERVICE_CALCULATE_RCTH_FAST = "calculate_rcth_fast"
-SERVICE_ON_HEATING_STOP = "on_heating_stop"
-SERVICE_ON_RECOVERY_START = "on_recovery_start"
-SERVICE_ON_RECOVERY_END = "on_recovery_end"
 
 # Weather forecast settings
 FORECAST_HOURS = 3

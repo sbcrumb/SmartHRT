@@ -21,6 +21,7 @@ from .state_machine import (
     SmartHRTState,
     SmartHRTStateMachine,
     VALID_TRANSITIONS,
+    TRANSITION_ACTIONS,
     STATE_FLAGS,
     get_state_flags,
 )
@@ -35,6 +36,7 @@ __all__ = [
     "SmartHRTState",
     "SmartHRTStateMachine",
     "VALID_TRANSITIONS",
+    "TRANSITION_ACTIONS",
     "STATE_FLAGS",
     "get_state_flags",
 ]

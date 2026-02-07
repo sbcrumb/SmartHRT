@@ -1,0 +1,112 @@
+id: 042
+title: "Centralisation du pilotage par méthodes 'Façade' dans le Coordinateur"
+status: "Accepté"
+date: "2026-02-07"
+context: |
+  Actuellement, les services dans `services.py` manipulent directement l'état 
+  de la machine à états ou les données de `SmartHRTData`. Par exemple, certains 
+  services forcent directement `rp_calc_mode = False` ou modifient 
+  `current_state` sans passer par les méthodes de transition appropriées.
+
+  **Problèmes identifiés :**
+
+  1. **Fuite d'abstraction :** Les services connaissent les détails internes 
+     de `SmartHRTData` et de la machine à états, ce qui viole le principe 
+     d'encapsulation.
+
+  2. **Risques d'incohérence :** Une modification directe de `self.data` peut 
+     contourner les validations et callbacks normalement déclenchés par les 
+     méthodes du coordinateur.
+
+  3. **Duplication de logique :** La même logique métier (snapshots, transitions, 
+     sauvegardes) est répétée dans plusieurs services au lieu d'être centralisée.
+
+  **Exemple problématique actuel :**
+
+  ```python
+  # Dans services.py
+  async def handle_stop_heating(call: ServiceCall) -> None:
+      coordinator.data.rp_calc_mode = False  # Modification directe
+      coordinator.data.recovery_calc_mode = False  # Modification directe
+      coordinator.force_state(SmartHRTState.HEATING_ON)  # Bypass des règles
+      await coordinator._save_learned_data()  # Appel méthode privée
+  ```
+
+decision: |
+  1. **Interdire toute modification directe de `self.data` depuis `services.py`.**
+     Les services ne doivent plus accéder aux attributs internes du coordinateur.
+
+  2. **Implémenter des méthodes de haut niveau (Façade)** dans `SmartHRTCoordinator` 
+     qui encapsulent la logique métier complète :
+
+  ```python
+  class SmartHRTCoordinator:
+      async def async_manual_stop_heating(self) -> None:
+          """Arrêt manuel du chauffage - méthode façade pour les services.
+          
+          Encapsule:
+          - Transition vers HEATING_ON
+          - Réinitialisation des flags via la machine à états
+          - Annulation des timers en cours
+          - Sauvegarde des données
+          """
+          self._cancel_recovery_timer()
+          self._cancel_recovery_update_timer()
+          
+          if not self.transition_to(SmartHRTState.HEATING_ON):
+              self.force_state(SmartHRTState.HEATING_ON)
+          
+          await self._save_learned_data()
+          self.async_set_updated_data(self.data)
+
+      async def async_manual_start_recovery(self) -> None:
+          """Démarrage manuel de la relance - méthode façade."""
+          self.on_recovery_start()
+          await self._save_learned_data()
+
+      async def async_manual_end_recovery(self) -> None:
+          """Fin manuelle de la relance - méthode façade."""
+          self.on_recovery_end()
+          await self._save_learned_data()
+
+      async def async_start_heating_cycle(self) -> None:
+          """Démarrage d'un nouveau cycle - méthode façade."""
+          await self._async_on_recoverycalc_hour()
+  ```
+
+  3. **Refactorer `services.py`** pour utiliser uniquement ces méthodes façade :
+
+  ```python
+  # Nouveau code dans services.py
+  async def handle_stop_heating(call: ServiceCall) -> None:
+      coordinator = _get_coordinator(call)
+      await coordinator.async_manual_stop_heating()
+
+  async def handle_start_recovery(call: ServiceCall) -> None:
+      coordinator = _get_coordinator(call)
+      await coordinator.async_manual_start_recovery()
+  ```
+
+consequences:
+  positive:
+    - "Code des services réduit à de simples délégations"
+    - "Garantie que les règles métier sont appliquées uniformément"
+    - "Simplification de la maintenance et des tests"
+    - "Impossible de mettre le système dans un état incohérent via les services"
+  negative:
+    - "Nécessite de créer des méthodes supplémentaires dans le coordinateur"
+    - "Les services perdent en flexibilité (mais c'est voulu)"
+
+implementation_notes: |
+  **Fichiers impactés :**
+  - `coordinator.py` : Ajout des méthodes `async_manual_*`
+  - `services.py` : Refactoring pour utiliser les méthodes façade
+
+  **Convention de nommage :**
+  - Préfixe `async_manual_` pour les méthodes exposées aux services
+  - Ces méthodes sont les seuls points d'entrée autorisés depuis `services.py`
+
+related_adrs:
+  - "ADR-033: Découplage de la Logique d'État (Pattern State)"
+  - "ADR-034: Gestion Centralisée des Effets de Bord via Callbacks"
+  - "ADR-043: Réduction drastique de la surface d'exposition des Services"
