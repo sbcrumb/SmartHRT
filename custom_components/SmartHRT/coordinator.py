@@ -28,16 +28,15 @@ ADR implémentées dans ce module:
 - ADR-035: Immuabilité état (transitions atomiques)
 - ADR-036: Factorisation setters (_update_and_recalculate)
 - ADR-037: Suppression polling minute (listener météo push)
-- ADR-038: Séparation configuration/état (SmartHRTConfig, StateData, WeatherData, etc.)
 - ADR-039: Simplification restauration (auto-correction, _is_state_coherent)
 - ADR-040: Délégation flags à la machine à états (propriétés calculées)
 - ADR-041: Sérialisation globale via as_dict/from_dict (remplace PERSISTED_FIELDS)
+- ADR-047: Unification du modèle de données (Single Source of Truth)
 """
 
 import asyncio
 import logging
 from datetime import datetime, timedelta, time as dt_time
-from dataclasses import dataclass, field
 from typing import Any, Callable
 from collections import deque
 
@@ -75,8 +74,14 @@ from .const import (
     FORECAST_HOURS,
     TEMP_DECREASE_THRESHOLD,
     DEFAULT_RECOVERYCALC_HOUR,
+    TimerKey,
 )
-from .serialization import JSONEncoder
+
+# ADR-051: Import du gestionnaire centralisé de timers
+from .timer_manager import TimerManager
+
+# ADR-047: Import du modèle de données unifié (remplace serialization.py)
+from .data_model import SmartHRTData
 
 # ADR-026: Import du modèle thermique Pure Python
 from .core import (
@@ -97,653 +102,10 @@ _LOGGER = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ADR-038: Sous-dataclasses pour séparation des responsabilités
+# ADR-047: SmartHRTData est maintenant importé de data_model.py
+# Les anciennes dataclasses (SmartHRTConfig, LearnedCoefficients, etc.)
+# sont supprimées car fusionnées dans le modèle Pydantic unifié.
 # ─────────────────────────────────────────────────────────────────────────────
-
-
-@dataclass
-class SmartHRTConfig:
-    """Configuration statique, modifiable via l'UI ou les services (ADR-038)."""
-
-    name: str = "SmartHRT"
-    tsp: float = DEFAULT_TSP
-    target_hour: dt_time = field(default_factory=lambda: dt_time(6, 0, 0))
-    recoverycalc_hour: dt_time = field(default_factory=lambda: dt_time(23, 0, 0))
-    smartheating_mode: bool = True
-    recovery_adaptive_mode: bool = True
-
-
-@dataclass
-class LearnedCoefficients:
-    """Coefficients thermiques appris par le système (ADR-038)."""
-
-    rcth: float = DEFAULT_RCTH
-    rpth: float = DEFAULT_RPTH
-    rcth_lw: float = DEFAULT_RCTH
-    rcth_hw: float = DEFAULT_RCTH
-    rpth_lw: float = DEFAULT_RPTH
-    rpth_hw: float = DEFAULT_RPTH
-    relaxation_factor: float = DEFAULT_RELAXATION_FACTOR
-
-
-@dataclass
-class SmartHRTStateData:
-    """État dynamique de la machine à états (ADR-038).
-
-    ADR-040: Les flags (recovery_calc_mode, rp_calc_mode, temp_lag_detection_active)
-    ne sont plus stockés ici - ils sont calculés depuis current_state.
-    """
-
-    current_state: SmartHRTState = SmartHRTState.HEATING_ON
-    # ADR-040: Flags supprimés - maintenant propriétés calculées dans SmartHRTData
-
-    # Snapshots de référence
-    time_recovery_calc: datetime | None = None
-    time_recovery_start: datetime | None = None
-    time_recovery_end: datetime | None = None
-    temp_recovery_calc: float = 17.0
-    temp_recovery_start: float = 17.0
-    temp_recovery_end: float = 17.0
-    text_recovery_calc: float = 0.0
-    text_recovery_start: float = 0.0
-    text_recovery_end: float = 0.0
-
-    # Triggers programmés
-    recovery_start_hour: datetime | None = None
-    recovery_update_hour: datetime | None = None
-
-    # Délai de lag avant baisse température
-    stop_lag_duration: float = 0.0
-
-
-@dataclass
-class WeatherData:
-    """Données météorologiques actuelles et prévisions (ADR-038)."""
-
-    interior_temp: float | None = None
-    exterior_temp: float | None = None
-    wind_speed: float = 0.0  # m/s
-    windchill: float | None = None
-    wind_speed_avg: float = 0.0  # m/s
-    wind_speed_forecast_avg: float = 0.0  # km/h
-    temperature_forecast_avg: float = 0.0  # °C
-    # ADR-037: Réduit à 50 samples
-    wind_speed_history: deque = field(default_factory=lambda: deque(maxlen=50))
-
-
-@dataclass
-class DiagnosticData:
-    """Données de diagnostic et métriques calculées (ADR-038)."""
-
-    rcth_fast: float = 0.0
-    rcth_calculated: float = 0.0
-    rpth_calculated: float = 0.0
-    last_rcth_error: float = 0.0
-    last_rpth_error: float = 0.0
-
-
-class SmartHRTData:
-    """Données du système SmartHRT (ADR-038: composition de sous-structures).
-
-    Structure organisée par responsabilité:
-    - config: Configuration utilisateur (statique)
-    - coefficients: Coefficients thermiques appris (évoluent lentement)
-    - state: État dynamique de la machine à états
-    - weather: Données météo actuelles
-    - diagnostic: Métriques de diagnostic (lecture seule)
-
-    Les champs restent accessibles directement (self.data.tsp) pour
-    compatibilité, tout en étant organisés en groupes logiques.
-    Supporte l'initialisation avec les anciens kwargs (name=, tsp=, etc.)
-    pour compatibilité ascendante.
-    """
-
-    def __init__(
-        self,
-        *,
-        # Nouveaux kwargs (sous-structures)
-        config: SmartHRTConfig | None = None,
-        coefficients: LearnedCoefficients | None = None,
-        state: SmartHRTStateData | None = None,
-        weather: WeatherData | None = None,
-        diagnostic: DiagnosticData | None = None,
-        # Anciens kwargs (compatibilité) - config
-        name: str | None = None,
-        tsp: float | None = None,
-        target_hour: dt_time | None = None,
-        recoverycalc_hour: dt_time | None = None,
-        smartheating_mode: bool | None = None,
-        recovery_adaptive_mode: bool | None = None,
-    ) -> None:
-        """Initialise SmartHRTData avec support des anciens et nouveaux kwargs."""
-        # Crée les sous-structures avec valeurs par défaut
-        self.config = config if config is not None else SmartHRTConfig()
-        self.coefficients = (
-            coefficients if coefficients is not None else LearnedCoefficients()
-        )
-        self.state = state if state is not None else SmartHRTStateData()
-        self.weather = weather if weather is not None else WeatherData()
-        self.diagnostic = diagnostic if diagnostic is not None else DiagnosticData()
-
-        # Applique les anciens kwargs sur la config si fournis
-        if name is not None:
-            self.config.name = name
-        if tsp is not None:
-            self.config.tsp = tsp
-        if target_hour is not None:
-            self.config.target_hour = target_hour
-        if recoverycalc_hour is not None:
-            self.config.recoverycalc_hour = recoverycalc_hour
-        if smartheating_mode is not None:
-            self.config.smartheating_mode = smartheating_mode
-        if recovery_adaptive_mode is not None:
-            self.config.recovery_adaptive_mode = recovery_adaptive_mode
-
-    def update(self, **kwargs: Any) -> "SmartHRTData":
-        """Met à jour les attributs en place et retourne self.
-
-        Permet de remplacer dataclasses.replace() pour SmartHRTData.
-        Usage: self.data.update(current_state=X, temp=Y)
-        """
-        for key, value in kwargs.items():
-            setattr(self, key, value)
-        return self
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # Propriétés de compatibilité vers config
-    # ─────────────────────────────────────────────────────────────────────────
-    @property
-    def name(self) -> str:
-        return self.config.name
-
-    @name.setter
-    def name(self, value: str) -> None:
-        self.config.name = value
-
-    @property
-    def tsp(self) -> float:
-        return self.config.tsp
-
-    @tsp.setter
-    def tsp(self, value: float) -> None:
-        self.config.tsp = value
-
-    @property
-    def target_hour(self) -> dt_time:
-        return self.config.target_hour
-
-    @target_hour.setter
-    def target_hour(self, value: dt_time) -> None:
-        self.config.target_hour = value
-
-    @property
-    def recoverycalc_hour(self) -> dt_time:
-        return self.config.recoverycalc_hour
-
-    @recoverycalc_hour.setter
-    def recoverycalc_hour(self, value: dt_time) -> None:
-        self.config.recoverycalc_hour = value
-
-    @property
-    def smartheating_mode(self) -> bool:
-        return self.config.smartheating_mode
-
-    @smartheating_mode.setter
-    def smartheating_mode(self, value: bool) -> None:
-        self.config.smartheating_mode = value
-
-    @property
-    def recovery_adaptive_mode(self) -> bool:
-        return self.config.recovery_adaptive_mode
-
-    @recovery_adaptive_mode.setter
-    def recovery_adaptive_mode(self, value: bool) -> None:
-        self.config.recovery_adaptive_mode = value
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # Propriétés de compatibilité vers coefficients
-    # ─────────────────────────────────────────────────────────────────────────
-    @property
-    def rcth(self) -> float:
-        return self.coefficients.rcth
-
-    @rcth.setter
-    def rcth(self, value: float) -> None:
-        self.coefficients.rcth = value
-
-    @property
-    def rpth(self) -> float:
-        return self.coefficients.rpth
-
-    @rpth.setter
-    def rpth(self, value: float) -> None:
-        self.coefficients.rpth = value
-
-    @property
-    def rcth_lw(self) -> float:
-        return self.coefficients.rcth_lw
-
-    @rcth_lw.setter
-    def rcth_lw(self, value: float) -> None:
-        self.coefficients.rcth_lw = value
-
-    @property
-    def rcth_hw(self) -> float:
-        return self.coefficients.rcth_hw
-
-    @rcth_hw.setter
-    def rcth_hw(self, value: float) -> None:
-        self.coefficients.rcth_hw = value
-
-    @property
-    def rpth_lw(self) -> float:
-        return self.coefficients.rpth_lw
-
-    @rpth_lw.setter
-    def rpth_lw(self, value: float) -> None:
-        self.coefficients.rpth_lw = value
-
-    @property
-    def rpth_hw(self) -> float:
-        return self.coefficients.rpth_hw
-
-    @rpth_hw.setter
-    def rpth_hw(self, value: float) -> None:
-        self.coefficients.rpth_hw = value
-
-    @property
-    def relaxation_factor(self) -> float:
-        return self.coefficients.relaxation_factor
-
-    @relaxation_factor.setter
-    def relaxation_factor(self, value: float) -> None:
-        self.coefficients.relaxation_factor = value
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # ADR-040: Flags calculés depuis current_state (propriétés en lecture seule)
-    # ─────────────────────────────────────────────────────────────────────────
-    @property
-    def current_state(self) -> SmartHRTState:
-        return self.state.current_state
-
-    @current_state.setter
-    def current_state(self, value: SmartHRTState) -> None:
-        self.state.current_state = value
-
-    @property
-    def recovery_calc_mode(self) -> bool:
-        """True si en état MONITORING (calculs de refroidissement actifs)."""
-        return self.state.current_state == SmartHRTState.MONITORING
-
-    @property
-    def rp_calc_mode(self) -> bool:
-        """True si en état HEATING_PROCESS (calculs de relance actifs)."""
-        return self.state.current_state == SmartHRTState.HEATING_PROCESS
-
-    @property
-    def temp_lag_detection_active(self) -> bool:
-        """True si en état DETECTING_LAG (surveillance de baisse température)."""
-        return self.state.current_state == SmartHRTState.DETECTING_LAG
-
-    @property
-    def time_recovery_calc(self) -> datetime | None:
-        return self.state.time_recovery_calc
-
-    @time_recovery_calc.setter
-    def time_recovery_calc(self, value: datetime | None) -> None:
-        self.state.time_recovery_calc = value
-
-    @property
-    def time_recovery_start(self) -> datetime | None:
-        return self.state.time_recovery_start
-
-    @time_recovery_start.setter
-    def time_recovery_start(self, value: datetime | None) -> None:
-        self.state.time_recovery_start = value
-
-    @property
-    def time_recovery_end(self) -> datetime | None:
-        return self.state.time_recovery_end
-
-    @time_recovery_end.setter
-    def time_recovery_end(self, value: datetime | None) -> None:
-        self.state.time_recovery_end = value
-
-    @property
-    def temp_recovery_calc(self) -> float:
-        return self.state.temp_recovery_calc
-
-    @temp_recovery_calc.setter
-    def temp_recovery_calc(self, value: float) -> None:
-        self.state.temp_recovery_calc = value
-
-    @property
-    def temp_recovery_start(self) -> float:
-        return self.state.temp_recovery_start
-
-    @temp_recovery_start.setter
-    def temp_recovery_start(self, value: float) -> None:
-        self.state.temp_recovery_start = value
-
-    @property
-    def temp_recovery_end(self) -> float:
-        return self.state.temp_recovery_end
-
-    @temp_recovery_end.setter
-    def temp_recovery_end(self, value: float) -> None:
-        self.state.temp_recovery_end = value
-
-    @property
-    def text_recovery_calc(self) -> float:
-        return self.state.text_recovery_calc
-
-    @text_recovery_calc.setter
-    def text_recovery_calc(self, value: float) -> None:
-        self.state.text_recovery_calc = value
-
-    @property
-    def text_recovery_start(self) -> float:
-        return self.state.text_recovery_start
-
-    @text_recovery_start.setter
-    def text_recovery_start(self, value: float) -> None:
-        self.state.text_recovery_start = value
-
-    @property
-    def text_recovery_end(self) -> float:
-        return self.state.text_recovery_end
-
-    @text_recovery_end.setter
-    def text_recovery_end(self, value: float) -> None:
-        self.state.text_recovery_end = value
-
-    @property
-    def recovery_start_hour(self) -> datetime | None:
-        return self.state.recovery_start_hour
-
-    @recovery_start_hour.setter
-    def recovery_start_hour(self, value: datetime | None) -> None:
-        self.state.recovery_start_hour = value
-
-    @property
-    def recovery_update_hour(self) -> datetime | None:
-        return self.state.recovery_update_hour
-
-    @recovery_update_hour.setter
-    def recovery_update_hour(self, value: datetime | None) -> None:
-        self.state.recovery_update_hour = value
-
-    @property
-    def stop_lag_duration(self) -> float:
-        return self.state.stop_lag_duration
-
-    @stop_lag_duration.setter
-    def stop_lag_duration(self, value: float) -> None:
-        self.state.stop_lag_duration = value
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # Propriétés de compatibilité vers weather
-    # ─────────────────────────────────────────────────────────────────────────
-    @property
-    def interior_temp(self) -> float | None:
-        return self.weather.interior_temp
-
-    @interior_temp.setter
-    def interior_temp(self, value: float | None) -> None:
-        self.weather.interior_temp = value
-
-    @property
-    def exterior_temp(self) -> float | None:
-        return self.weather.exterior_temp
-
-    @exterior_temp.setter
-    def exterior_temp(self, value: float | None) -> None:
-        self.weather.exterior_temp = value
-
-    @property
-    def wind_speed(self) -> float:
-        return self.weather.wind_speed
-
-    @wind_speed.setter
-    def wind_speed(self, value: float) -> None:
-        self.weather.wind_speed = value
-
-    @property
-    def windchill(self) -> float | None:
-        return self.weather.windchill
-
-    @windchill.setter
-    def windchill(self, value: float | None) -> None:
-        self.weather.windchill = value
-
-    @property
-    def wind_speed_avg(self) -> float:
-        return self.weather.wind_speed_avg
-
-    @wind_speed_avg.setter
-    def wind_speed_avg(self, value: float) -> None:
-        self.weather.wind_speed_avg = value
-
-    @property
-    def wind_speed_forecast_avg(self) -> float:
-        return self.weather.wind_speed_forecast_avg
-
-    @wind_speed_forecast_avg.setter
-    def wind_speed_forecast_avg(self, value: float) -> None:
-        self.weather.wind_speed_forecast_avg = value
-
-    @property
-    def temperature_forecast_avg(self) -> float:
-        return self.weather.temperature_forecast_avg
-
-    @temperature_forecast_avg.setter
-    def temperature_forecast_avg(self, value: float) -> None:
-        self.weather.temperature_forecast_avg = value
-
-    @property
-    def wind_speed_history(self) -> deque:
-        return self.weather.wind_speed_history
-
-    @wind_speed_history.setter
-    def wind_speed_history(self, value: deque) -> None:
-        self.weather.wind_speed_history = value
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # Propriétés de compatibilité vers diagnostic
-    # ─────────────────────────────────────────────────────────────────────────
-    @property
-    def rcth_fast(self) -> float:
-        return self.diagnostic.rcth_fast
-
-    @rcth_fast.setter
-    def rcth_fast(self, value: float) -> None:
-        self.diagnostic.rcth_fast = value
-
-    @property
-    def rcth_calculated(self) -> float:
-        return self.diagnostic.rcth_calculated
-
-    @rcth_calculated.setter
-    def rcth_calculated(self, value: float) -> None:
-        self.diagnostic.rcth_calculated = value
-
-    @property
-    def rpth_calculated(self) -> float:
-        return self.diagnostic.rpth_calculated
-
-    @rpth_calculated.setter
-    def rpth_calculated(self, value: float) -> None:
-        self.diagnostic.rpth_calculated = value
-
-    @property
-    def last_rcth_error(self) -> float:
-        return self.diagnostic.last_rcth_error
-
-    @last_rcth_error.setter
-    def last_rcth_error(self, value: float) -> None:
-        self.diagnostic.last_rcth_error = value
-
-    @property
-    def last_rpth_error(self) -> float:
-        return self.diagnostic.last_rpth_error
-
-    @last_rpth_error.setter
-    def last_rpth_error(self, value: float) -> None:
-        self.diagnostic.last_rpth_error = value
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # ADR-041: Sérialisation centralisée via as_dict/from_dict
-    # ─────────────────────────────────────────────────────────────────────────
-
-    # Champs persistés (ADR-041: remplace PERSISTED_FIELDS)
-    _PERSISTENT_FIELDS: set[str] = {
-        # Coefficients thermiques
-        "rcth",
-        "rpth",
-        "rcth_lw",
-        "rcth_hw",
-        "rpth_lw",
-        "rpth_hw",
-        "last_rcth_error",
-        "last_rpth_error",
-        # État machine
-        "current_state",
-        "stop_lag_duration",
-        # Heures configurées
-        "target_hour",
-        "recoverycalc_hour",
-        # Snapshots de session
-        "time_recovery_calc",
-        "temp_recovery_calc",
-        "text_recovery_calc",
-        # Triggers programmés
-        "recovery_start_hour",
-        # Prévisions météo
-        "temperature_forecast_avg",
-        "wind_speed_forecast_avg",
-        # Historique vent
-        "wind_speed_history",
-    }
-
-    # Mapping des champs enum pour décodage
-    _ENUM_FIELDS: dict[str, type] = {}
-
-    def as_dict(self) -> dict[str, Any]:
-        """Sérialise les données persistantes en dictionnaire JSON-compatible.
-
-        ADR-041: Centralise la sérialisation, remplace PERSISTED_FIELDS.
-
-        Returns:
-            Dictionnaire avec toutes les données à persister.
-        """
-        result: dict[str, Any] = {}
-        for field_name in self._PERSISTENT_FIELDS:
-            value = getattr(self, field_name, None)
-            result[field_name] = JSONEncoder.encode(value)
-        return result
-
-    @classmethod
-    def from_dict(
-        cls,
-        data: dict[str, Any],
-        defaults: "SmartHRTData | None" = None,
-        enum_types: dict[str, type] | None = None,
-    ) -> "SmartHRTData":
-        """Désérialise un dictionnaire en SmartHRTData.
-
-        ADR-041: Centralise la désérialisation.
-
-        Args:
-            data: Dictionnaire JSON chargé depuis le stockage
-            defaults: Instance par défaut pour les champs manquants
-            enum_types: Mapping des champs enum vers leurs types
-
-        Returns:
-            Nouvelle instance SmartHRTData avec données restaurées.
-        """
-        if defaults is None:
-            defaults = cls()
-        if enum_types is None:
-            enum_types = cls._ENUM_FIELDS
-
-        # Importer SmartHRTState localement pour éviter import circulaire
-        from .core import SmartHRTState
-
-        enum_types = {"current_state": SmartHRTState, **enum_types}
-
-        # Crée une nouvelle instance basée sur defaults
-        instance = cls(
-            config=SmartHRTConfig(
-                name=defaults.config.name,
-                tsp=defaults.config.tsp,
-                target_hour=defaults.config.target_hour,
-                recoverycalc_hour=defaults.config.recoverycalc_hour,
-                smartheating_mode=defaults.config.smartheating_mode,
-                recovery_adaptive_mode=defaults.config.recovery_adaptive_mode,
-            )
-        )
-
-        # Restaurer les champs depuis data
-        for field_name in cls._PERSISTENT_FIELDS:
-            if field_name in data:
-                stored_value = data[field_name]
-                expected_type = enum_types.get(field_name)
-                decoded = JSONEncoder.decode(stored_value, expected_type)
-                if decoded is not None:
-                    setattr(instance, field_name, decoded)
-            else:
-                # Utiliser la valeur par défaut
-                default_value = getattr(defaults, field_name, None)
-                if default_value is not None:
-                    setattr(instance, field_name, default_value)
-
-        return instance
-
-    @classmethod
-    def migrate_legacy_format(cls, data: dict[str, Any]) -> dict[str, Any]:
-        """Migre les données de l'ancien format PERSISTED_FIELDS.
-
-        Détecte l'ancien format (pas de __type__) et convertit au nouveau.
-
-        Args:
-            data: Données au format legacy
-
-        Returns:
-            Données au nouveau format avec __type__
-        """
-        # Import local pour éviter import circulaire
-        from .core import SmartHRTState
-
-        # Mapping ancien format vers nouveau
-        legacy_types = {
-            "target_hour": "time",
-            "recoverycalc_hour": "time",
-            "recovery_start_hour": "datetime",
-            "time_recovery_calc": "datetime",
-            "current_state": "state",
-            "wind_speed_history": "list",
-        }
-
-        migrated: dict[str, Any] = {}
-        for key, value in data.items():
-            if value is None:
-                migrated[key] = None
-                continue
-
-            field_type = legacy_types.get(key)
-            if field_type == "datetime" and isinstance(value, str):
-                migrated[key] = {"__type__": "datetime", "value": value}
-            elif field_type == "time" and isinstance(value, str):
-                migrated[key] = {"__type__": "time", "value": value}
-            elif field_type == "state" and isinstance(value, str):
-                migrated[key] = {"__type__": "enum", "value": value}
-            elif field_type == "list" and isinstance(value, list):
-                migrated[key] = {"__type__": "deque", "value": value, "maxlen": 50}
-            else:
-                # Valeurs primitives (float, bool, str) - pas de changement
-                migrated[key] = value
-
-        return migrated
 
 
 class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
@@ -770,13 +132,8 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
 
         self._entry = entry
         self._unsub_listeners: list = []
-        self._unsub_time_triggers: list = []
-        self._unsub_recovery_update: Callable | None = (
-            None  # Tracker pour recovery_update
-        )
-        self._unsub_recovery_start: Callable | None = (
-            None  # Tracker pour recovery_start (corrige le bug yoyo)
-        )
+        # ADR-051: Gestionnaire centralisé des timers
+        self._timer_manager = TimerManager(hass)
         # ADR-004 & ADR-009: Stratégie hybride de persistance
         # Les coefficients appris (RCth, RPth) et l'état survivent aux redémarrages
         self._store: Store = Store(
@@ -793,11 +150,12 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
         )
 
         # ADR-033/034/046: Machine à états avec actions déclaratives
+        # ADR-049: Démarrage en INITIALIZING, transition vers l'état restauré dans _restore_learned_data
         log_prefix = f"[{self.data.name}#{entry.entry_id[:8]}]"
         self._state_machine = SmartHRTStateMachine(
-            self.data.current_state,
+            SmartHRTState.INITIALIZING,  # ADR-049: Toujours démarrer en INITIALIZING
             transition_actions=TRANSITION_ACTIONS,
-            logger=_LOGGER,
+            logger=_LOGGER,  # type: ignore[arg-type]
             log_prefix=log_prefix,
         )
         self._state_machine.on_enter(SmartHRTState.HEATING_ON, self._on_state_entered)
@@ -839,27 +197,12 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
         self.data.current_state = new_state
 
     def transition_to(self, new_state: SmartHRTState) -> bool:
-        """Effectue une transition d'état si elle est valide (ADR-028)."""
-        current = self._state_machine.state
-        valid_targets = VALID_TRANSITIONS.get(current, set())
+        """Effectue une transition d'état si elle est valide (ADR-028).
 
-        if self._state_machine.transition_to(new_state):
-            _LOGGER.info(
-                "%s Transition %s → %s",
-                self._log_prefix(),
-                current.value,
-                new_state.value,
-            )
-            return True
-
-        _LOGGER.warning(
-            "%s Transition invalide %s → %s (autorisées: %s)",
-            self._log_prefix(),
-            current.value,
-            new_state.value,
-            ", ".join(s.value for s in valid_targets) if valid_targets else "aucune",
-        )
-        return False
+        Note: Les logs de transition sont émis par la state machine elle-même.
+        """
+        # La state machine gère le logging des transitions (succès et échecs)
+        return self._state_machine.transition_to(new_state)
 
     def _apply_state_transition_with_actions(
         self,
@@ -886,7 +229,7 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
         # ADR-040: Les flags sont maintenant des propriétés calculées depuis current_state
         # On ne merge plus get_state_flags(), juste les updates fournis
         self.data.update(current_state=new_state, **(updates or {}))
-        self._state_machine.force_state(new_state, run_callbacks=False)
+        self._state_machine._force_state_unsafe(new_state, run_callbacks=False)
 
         actions = self._state_machine.actions_for_transition(current, new_state)
         if omit_actions:
@@ -896,28 +239,12 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
     def transition_with_actions(
         self, new_state: SmartHRTState
     ) -> StateTransitionResult:
-        """Effectue une transition et retourne les actions à exécuter (ADR-034)."""
-        current = self._state_machine.state
-        valid_targets = VALID_TRANSITIONS.get(current, set())
-        result = self._state_machine.transition_with_actions(new_state)
+        """Effectue une transition et retourne les actions à exécuter (ADR-034).
 
-        if result.success:
-            _LOGGER.info(
-                "%s Transition %s → %s",
-                self._log_prefix(),
-                current.value,
-                new_state.value,
-            )
-            return result
-
-        _LOGGER.warning(
-            "%s Transition invalide %s → %s (autorisées: %s)",
-            self._log_prefix(),
-            current.value,
-            new_state.value,
-            ", ".join(s.value for s in valid_targets) if valid_targets else "aucune",
-        )
-        return result
+        Note: Les logs de transition sont émis par la state machine elle-même.
+        """
+        # La state machine gère le logging des transitions (succès et échecs)
+        return self._state_machine.transition_with_actions(new_state)
 
     def _execute_actions(self, actions: list[Action]) -> None:
         """Exécute les actions émises par la machine à états (ADR-034).
@@ -963,10 +290,8 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
                 )
 
     def _cancel_recovery_start_timer(self) -> None:
-        """Annule le trigger de recovery_start si présent."""
-        if self._unsub_recovery_start:
-            self._unsub_recovery_start()
-            self._unsub_recovery_start = None
+        """Annule le trigger de recovery_start si présent (ADR-051)."""
+        self._timer_manager.cancel(TimerKey.RECOVERY_START)
 
     def _snapshot_recovery_start(self) -> None:
         """Snapshot des données au démarrage de relance."""
@@ -996,6 +321,9 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
     def force_state(self, new_state: SmartHRTState) -> None:
         """Force un changement d'état sans validation (ADR-028, ADR-035).
 
+        ADR-049: Cette méthode reste pour les cas de fallback et services admin.
+        Pour la restauration après redémarrage, utiliser transition_to depuis INITIALIZING.
+
         Met à jour atomiquement l'état et les flags associés.
         À utiliser avec parcimonie (restauration, services admin).
         """
@@ -1006,7 +334,7 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
         # ADR-040: Les flags sont maintenant calculés depuis current_state
         # Seul current_state est mis à jour
         self.data.update(current_state=new_state)
-        self._state_machine.force_state(new_state, run_callbacks=False)
+        self._state_machine._force_state_unsafe(new_state, run_callbacks=False)
 
         _LOGGER.info(
             "%s État forcé %s → %s",
@@ -1104,8 +432,8 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
         """Termine l'initialisation des fonctionnalités dépendantes de la météo."""
         await self._update_weather_forecasts()
 
-        # Calcul initial de l'heure de relance
-        await self.hass.async_add_executor_job(self.calculate_recovery_time)
+        # ADR-048: Calcul synchrone (< 10ms, pas d'I/O bloquante)
+        self.calculate_recovery_time()
 
         # Programmer le trigger de relance si nécessaire
         now = dt_util.now()
@@ -1115,9 +443,8 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
         # Programmer la première mise à jour de recovery_update_hour
         # Le trigger est toujours programmé pour maintenir la chaîne de mises à jour active
         if self.data.smartheating_mode and self.data.recovery_start_hour:
-            update_time = await self.hass.async_add_executor_job(
-                self.calculate_recovery_update_time
-            )
+            # ADR-048: Calcul synchrone (< 10ms)
+            update_time = self.calculate_recovery_update_time()
             if update_time:
                 self.data.recovery_update_hour = update_time
                 self._schedule_recovery_update(update_time)
@@ -1127,8 +454,7 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
 
         ADR-004: Stratégie hybride de persistance
         ADR-009: Persistance des coefficients thermiques
-        ADR-029: Validation des données avec Pydantic
-        ADR-041: Sérialisation centralisée via as_dict/from_dict
+        ADR-047: Sérialisation native Pydantic (remplace ADR-029, ADR-041)
 
         This ensures that learned thermal constants (RCth, RPth) and the
         current state machine state survive Home Assistant restarts.
@@ -1140,20 +466,13 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
                 self._log_prefix(),
             )
 
-            # ADR-041: Détecter et migrer l'ancien format si nécessaire
-            # L'ancien format n'a pas de __type__ dans les valeurs complexes
+            # ADR-047: Détecter et migrer l'ancien format si nécessaire
+            # L'ancien format utilise __type__ pour les valeurs complexes
             if self._is_legacy_format(stored_data):
                 _LOGGER.debug("%s Migration depuis l'ancien format", self._log_prefix())
                 stored_data = SmartHRTData.migrate_legacy_format(stored_data)
 
-            # ADR-029: Validation Pydantic des données persistées
-            from .models import validate_persisted_data
-
-            validated_data = validate_persisted_data(
-                self._decode_stored_data(stored_data)
-            )
-
-            # ADR-041: Désérialisation centralisée avec données validées
+            # ADR-047: Désérialisation native Pydantic
             self.data = SmartHRTData.from_dict(stored_data, defaults=self.data)
 
             _LOGGER.debug(
@@ -1172,20 +491,29 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
                 self._log_prefix(),
             )
 
-        self._state_machine.force_state(self.data.current_state)
-
-    def _decode_stored_data(self, stored_data: dict) -> dict:
-        """Décode les données stockées en types Python natifs pour validation.
-
-        ADR-029: Prépare les données pour validation Pydantic.
-        """
-        decoded = {}
-        for key, value in stored_data.items():
-            if isinstance(value, dict) and "__type__" in value:
-                decoded[key] = JSONEncoder.decode(value)
+        # ADR-049: Transition depuis INITIALIZING vers l'état cible
+        # Utilise transition_to pour déclencher les callbacks on_enter
+        target_state = self.data.current_state
+        if self._state_machine.state == SmartHRTState.INITIALIZING:
+            result = self._state_machine.transition_with_actions(target_state)
+            if result.success:
+                _LOGGER.info(
+                    "%s État restauré: INITIALIZING → %s",
+                    self._log_prefix(),
+                    target_state.value,
+                )
+                # Exécuter les actions de transition (ex: SCHEDULE_RECOVERY_UPDATE)
+                self._execute_actions(result.actions)
             else:
-                decoded[key] = value
-        return decoded
+                _LOGGER.error(
+                    "%s Échec de transition vers %s, forçage",
+                    self._log_prefix(),
+                    target_state.value,
+                )
+                self._state_machine._force_state_unsafe(target_state)
+        else:
+            # Déjà dans un état valide (cas de migration)
+            self._state_machine._force_state_unsafe(self.data.current_state)
 
     def _is_legacy_format(self, data: dict) -> bool:
         """Détecte si les données sont au format legacy (PERSISTED_FIELDS).
@@ -1206,7 +534,7 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
     async def _save_learned_data(self) -> None:
         """Save learned coefficients and state to persistent storage.
 
-        ADR-041: Sérialisation centralisée via as_dict/from_dict.
+        ADR-047: Sérialisation native Pydantic via as_dict().
 
         Called after each state transition and learning cycle to persist
         the updated coefficients and state.
@@ -1250,10 +578,18 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
         )
 
     def _setup_time_triggers(self) -> None:
-        """Configure les déclencheurs horaires selon le YAML"""
+        """Configure les déclencheurs horaires selon le YAML (ADR-051)."""
         self._cancel_time_triggers()
 
         now = dt_util.now()
+
+        # Guards pour target_hour et recoverycalc_hour (requis pour le fonctionnement)
+        if not self.data.target_hour or not self.data.recoverycalc_hour:
+            _LOGGER.error(
+                "%s target_hour ou recoverycalc_hour non défini, triggers non configurés",
+                self._log_prefix(),
+            )
+            return
 
         # Trigger pour recoverycalc_hour (arrêt chauffage le soir)
         recoverycalc_dt = now.replace(
@@ -1265,10 +601,10 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
         if recoverycalc_dt <= now:
             recoverycalc_dt += timedelta(days=1)
 
-        self._unsub_time_triggers.append(
-            async_track_point_in_time(
-                self.hass, self._on_recoverycalc_hour, recoverycalc_dt
-            )
+        self._timer_manager.schedule(
+            TimerKey.RECOVERYCALC_HOUR,
+            self._on_recoverycalc_hour,
+            recoverycalc_dt,
         )
 
         # Trigger pour target_hour (fin de relance / réveil)
@@ -1281,8 +617,10 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
         if target_dt <= now:
             target_dt += timedelta(days=1)
 
-        self._unsub_time_triggers.append(
-            async_track_point_in_time(self.hass, self._on_target_hour, target_dt)
+        self._timer_manager.schedule(
+            TimerKey.TARGET_HOUR,
+            self._on_target_hour,
+            target_dt,
         )
 
         # Trigger pour recovery_start_hour (démarrage relance)
@@ -1291,12 +629,21 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
             if recovery_start.tzinfo is None:
                 recovery_start = dt_util.as_local(recovery_start)
             if recovery_start > now:
-                self._unsub_time_triggers.append(
-                    async_track_point_in_time(
-                        self.hass,
-                        self._on_recovery_start_hour,
-                        recovery_start,
-                    )
+                self._timer_manager.schedule(
+                    TimerKey.RECOVERY_START,
+                    self._on_recovery_start_hour,
+                    recovery_start,
+                )
+                _LOGGER.info(
+                    "%s Trigger RECOVERY_START programmé pour %s",
+                    self._log_prefix(),
+                    recovery_start.time(),
+                )
+            else:
+                _LOGGER.debug(
+                    "%s recovery_start_hour %s est dans le passé, trigger non programmé",
+                    self._log_prefix(),
+                    recovery_start,
                 )
 
         # Trigger pour recovery_update_hour (mise à jour calcul)
@@ -1305,31 +652,25 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
             if recovery_update.tzinfo is None:
                 recovery_update = dt_util.as_local(recovery_update)
             if recovery_update > now:
-                self._unsub_time_triggers.append(
-                    async_track_point_in_time(
-                        self.hass,
-                        self._on_recovery_update_hour,
-                        recovery_update,
-                    )
+                self._timer_manager.schedule(
+                    TimerKey.RECOVERY_UPDATE,
+                    self._on_recovery_update_hour,
+                    recovery_update,
                 )
 
     def _cancel_time_triggers(self) -> None:
-        """Annule les déclencheurs horaires"""
-        for unsub in self._unsub_time_triggers:
-            unsub()
-        self._unsub_time_triggers.clear()
+        """Annule les déclencheurs horaires (ADR-051)."""
+        self._timer_manager.cancel(TimerKey.RECOVERYCALC_HOUR)
+        self._timer_manager.cancel(TimerKey.TARGET_HOUR)
+        self._timer_manager.cancel(TimerKey.RECOVERY_START)
+        self._timer_manager.cancel(TimerKey.RECOVERY_UPDATE)
 
     async def async_unload(self) -> None:
-        """Déchargement du coordinateur"""
-        self._cancel_time_triggers()
-        # Annuler le trigger de recovery_update
-        if self._unsub_recovery_update:
-            self._unsub_recovery_update()
-            self._unsub_recovery_update = None
-        # Annuler le trigger de recovery_start (bug yoyo fix)
-        if self._unsub_recovery_start:
-            self._unsub_recovery_start()
-            self._unsub_recovery_start = None
+        """Déchargement du coordinateur (ADR-051)."""
+        # ADR-051: Annulation de tous les timers en une seule opération
+        self._timer_manager.cancel_all()
+
+        # Annuler les listeners d'événements
         for unsub in self._unsub_listeners:
             unsub()
         self._unsub_listeners.clear()
@@ -1441,8 +782,8 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
         # Sauvegarder l'heure de relance avant calcul
         prev_recovery_start = self.data.recovery_start_hour
 
-        # Exécuter les calculs lourds dans un exécuteur
-        await self.hass.async_add_executor_job(self.calculate_recovery_time)
+        # ADR-048: Calculs synchrones car < 10ms et pas d'I/O bloquante
+        self.calculate_recovery_time()
 
         # Programmer le trigger de relance si nécessaire (depuis le thread principal)
         now = dt_util.now()
@@ -1455,9 +796,8 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
 
         # Toujours programmer la mise à jour de recovery_update_hour
         # pour maintenir la chaîne de mises à jour active
-        update_time = await self.hass.async_add_executor_job(
-            self.calculate_recovery_update_time
-        )
+        # ADR-048: Calcul synchrone (< 10ms)
+        update_time = self.calculate_recovery_update_time()
         if update_time:
             self.data.recovery_update_hour = update_time
             self._schedule_recovery_update(update_time)
@@ -1518,14 +858,15 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
         self.hass.async_create_task(self._async_on_recovery_update_hour())
 
     async def _async_on_recovery_update_hour(self) -> None:
-        """Exécute les calculs lourds de mise à jour dans un exécuteur"""
+        """Exécute les calculs de mise à jour (ADR-048: synchrones car < 10ms)."""
         # Sauvegarder l'heure de relance avant calcul
         prev_recovery_start = self.data.recovery_start_hour
 
         # N'exécuter les calculs que si recovery_calc_mode est actif
+        # ADR-048: Calculs synchrones (pas d'I/O, < 10ms chacun)
         if self.data.recovery_calc_mode:
-            await self.hass.async_add_executor_job(self.calculate_rcth_fast)
-            await self.hass.async_add_executor_job(self.calculate_recovery_time)
+            self.calculate_rcth_fast()
+            self.calculate_recovery_time()
 
             # Programmer le trigger de relance si nécessaire (depuis le thread principal)
             now = dt_util.now()
@@ -1538,9 +879,8 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
 
         # Toujours reprogrammer le prochain trigger de mise à jour
         # pour maintenir la chaîne active même si recovery_calc_mode est off
-        update_time = await self.hass.async_add_executor_job(
-            self.calculate_recovery_update_time
-        )
+        # ADR-048: Calcul synchrone (< 10ms)
+        update_time = self.calculate_recovery_update_time()
 
         if update_time:
             self.data.recovery_update_hour = update_time
@@ -1554,7 +894,9 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
         self.async_set_updated_data(self.data)
 
     def _reschedule_recoverycalc_hour(self) -> None:
-        """Reprogramme le déclencheur recoverycalc_hour pour le lendemain"""
+        """Reprogramme le déclencheur recoverycalc_hour pour le lendemain (ADR-051)."""
+        if not self.data.recoverycalc_hour:
+            return
         now = dt_util.now()
         next_trigger = now.replace(
             hour=self.data.recoverycalc_hour.hour,
@@ -1563,14 +905,16 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
             microsecond=0,
         ) + timedelta(days=1)
 
-        self._unsub_time_triggers.append(
-            async_track_point_in_time(
-                self.hass, self._on_recoverycalc_hour, next_trigger
-            )
+        self._timer_manager.schedule(
+            TimerKey.RECOVERYCALC_HOUR,
+            self._on_recoverycalc_hour,
+            next_trigger,
         )
 
     def _reschedule_target_hour(self) -> None:
-        """Reprogramme le déclencheur target_hour pour le lendemain"""
+        """Reprogramme le déclencheur target_hour pour le lendemain (ADR-051)."""
+        if not self.data.target_hour:
+            return
         now = dt_util.now()
         next_trigger = now.replace(
             hour=self.data.target_hour.hour,
@@ -1579,19 +923,28 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
             microsecond=0,
         ) + timedelta(days=1)
 
-        self._unsub_time_triggers.append(
-            async_track_point_in_time(self.hass, self._on_target_hour, next_trigger)
+        self._timer_manager.schedule(
+            TimerKey.TARGET_HOUR,
+            self._on_target_hour,
+            next_trigger,
         )
 
     def _schedule_recovery_start(self, trigger_time: datetime) -> None:
-        """Programme le déclencheur de démarrage de relance.
+        """Programme le déclencheur de démarrage de relance (ADR-051).
 
         Annule le trigger précédent s'il existe avant d'en programmer un nouveau.
         Génère des logs appropriés pour la traçabilité.
         """
-        # Annuler le trigger précédent s'il existe
-        if self._unsub_recovery_start:
-            self._unsub_recovery_start()
+        was_active = self._timer_manager.is_active(TimerKey.RECOVERY_START)
+
+        # ADR-051: schedule() annule automatiquement l'ancien timer
+        self._timer_manager.schedule(
+            TimerKey.RECOVERY_START,
+            self._on_recovery_start_hour,
+            trigger_time,
+        )
+
+        if was_active:
             _LOGGER.debug(
                 "%s Trigger reprogrammé: annulation du précédent, nouveau à %s",
                 self._log_prefix(),
@@ -1604,25 +957,19 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
                 trigger_time,
             )
 
-        self._unsub_recovery_start = async_track_point_in_time(
-            self.hass, self._on_recovery_start_hour, trigger_time
-        )
-
     @callback
     def _schedule_recovery_update(self, trigger_time: datetime) -> None:
-        """Programme le déclencheur de mise à jour du calcul"""
-        # Annuler le trigger précédent s'il existe
-        if self._unsub_recovery_update:
-            self._unsub_recovery_update()
-            self._unsub_recovery_update = None
-
+        """Programme le déclencheur de mise à jour du calcul (ADR-051)."""
         _LOGGER.debug(
             "%s Programmation prochaine mise à jour: %s",
             self._log_prefix(),
             trigger_time,
         )
-        self._unsub_recovery_update = async_track_point_in_time(
-            self.hass, self._on_recovery_update_hour, trigger_time
+        # ADR-051: schedule() annule automatiquement l'ancien timer
+        self._timer_manager.schedule(
+            TimerKey.RECOVERY_UPDATE,
+            self._on_recovery_update_hour,
+            trigger_time,
         )
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1812,7 +1159,7 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
             temperature_forecast_avg=self.data.temperature_forecast_avg,
             wind_speed_forecast_avg_kmh=self.data.wind_speed_forecast_avg,
             tsp=self.data.tsp,
-            target_hour=self.data.target_hour,
+            target_hour=self.data.target_hour or dt_time(6, 0),
             now=dt_util.now(),
             temp_recovery_calc=self.data.temp_recovery_calc,
             text_recovery_calc=self.data.text_recovery_calc,
@@ -2116,6 +1463,10 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
         target = self.data.target_hour
         recoverycalc = self.data.recoverycalc_hour
 
+        # Si target ou recoverycalc manquent, on ne peut pas déterminer la cohérence
+        if not target or not recoverycalc:
+            return False
+
         is_night = self._is_night_period(current_time, target, recoverycalc)
 
         # MONITORING/DETECTING_LAG valides la nuit uniquement
@@ -2157,6 +1508,8 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
 
         elif state in (SmartHRTState.RECOVERY, SmartHRTState.HEATING_PROCESS):
             # Vérifier si target_hour est dépassée
+            if not self.data.target_hour:
+                return
             target_dt = now.replace(
                 hour=self.data.target_hour.hour,
                 minute=self.data.target_hour.minute,
@@ -2342,11 +1695,9 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
         - Annulation des timers en cours
         - Sauvegarde des données
         """
-        # Annuler les timers
-        self._cancel_recovery_start_timer()
-        if self._unsub_recovery_update:
-            self._unsub_recovery_update()
-            self._unsub_recovery_update = None
+        # ADR-051: Annuler les timers via TimerManager
+        self._timer_manager.cancel(TimerKey.RECOVERY_START)
+        self._timer_manager.cancel(TimerKey.RECOVERY_UPDATE)
 
         # Transition vers HEATING_ON
         if not self.transition_to(SmartHRTState.HEATING_ON):
@@ -2447,8 +1798,14 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
             "temp_lag_detection_active": self.data.temp_lag_detection_active,
             "interior_temp": self.data.interior_temp,
             "exterior_temp": self.data.exterior_temp,
-            "target_hour": self.data.target_hour.isoformat(),
-            "recoverycalc_hour": self.data.recoverycalc_hour.isoformat(),
+            "target_hour": (
+                self.data.target_hour.isoformat() if self.data.target_hour else None
+            ),
+            "recoverycalc_hour": (
+                self.data.recoverycalc_hour.isoformat()
+                if self.data.recoverycalc_hour
+                else None
+            ),
             "recovery_start_hour": (
                 self.data.recovery_start_hour.isoformat()
                 if self.data.recovery_start_hour
@@ -2461,8 +1818,9 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
 
     async def async_trigger_calculation(self) -> dict[str, Any]:
         """Force un recalcul du temps de relance - méthode façade (ADR-042)."""
-        await self.hass.async_add_executor_job(self.calculate_recovery_time)
-        self._notify_listeners()
+        # ADR-048: Calcul synchrone (< 10ms, pas d'I/O bloquante)
+        self.calculate_recovery_time()
+        self.async_set_updated_data(self.data)
 
         return {
             "success": True,
@@ -2538,11 +1896,20 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
 
     def set_target_hour(self, value: dt_time) -> None:
         """Définit l'heure cible (réveil)."""
+        old_recovery_start = self.data.recovery_start_hour
         self._update_and_recalculate(
             "target_hour",
             value,
             reschedule=False,  # Géré par _setup_time_triggers
             persist=True,
+        )
+        new_recovery_start = self.data.recovery_start_hour
+        _LOGGER.info(
+            "%s target_hour=%s → recovery_start_hour: %s → %s",
+            self._log_prefix(),
+            value,
+            old_recovery_start.time() if old_recovery_start else None,
+            new_recovery_start.time() if new_recovery_start else None,
         )
         self._setup_time_triggers()
 

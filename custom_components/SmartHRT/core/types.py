@@ -132,6 +132,31 @@ class RecoveryResult:
     duration_hours: float  # Durée estimée de la relance (heures)
 
 
+# ADR-050: Gardes physiques pour les calculs thermiques
+class PhysicsGuardResult(StrEnum):
+    """Résultat de la validation des contraintes physiques (ADR-050)."""
+
+    VALID = "valid"  # Calcul autorisé
+    ALREADY_AT_TARGET = "already_at_target"  # Déjà à température cible
+    NO_HEAT_LOSS = "no_heat_loss"  # Extérieur plus chaud que l'intérieur
+    TARGET_UNREACHABLE = "target_unreachable"  # Cible <= température extérieure
+    INVALID_COEFFICIENT = "invalid_coefficient"  # RCth ou RPth invalide
+    EXTERIOR_WARMER = "exterior_warmer"  # Extérieur plus chaud que la cible
+    MISSING_DATA = "missing_data"  # Données manquantes
+
+
+@dataclass(frozen=True)
+class PhysicsValidation:
+    """Résultat de validation avec contexte (ADR-050).
+
+    Fournit un message explicatif et une valeur suggérée pour certains cas.
+    """
+
+    result: PhysicsGuardResult
+    message: str | None = None
+    suggested_value: float | None = None  # Pour les cas avec valeur par défaut
+
+
 @dataclass
 class CoefficientUpdateResult:
     """Résultat d'une mise à jour de coefficients.

@@ -1,6 +1,6 @@
 id: 050
 title: "Sécurisation des Calculs par Gardes Physiques"
-status: "Proposé"
+status: "Accepté"
 date: "2026-02-07"
 context: |
   Le module `thermal.py` contient la logique de calcul thermique. 

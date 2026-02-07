@@ -148,5 +148,78 @@
         }
       }
     }
+  },
+  "entity": {
+    "sensor": {
+      "interior_temp": {
+        "name": "Interior Temperature"
+      },
+      "exterior_temp": {
+        "name": "Exterior Temperature"
+      },
+      "windchill": {
+        "name": "Wind Chill Temperature"
+      },
+      "temp_forecast": {
+        "name": "Temperature Forecast"
+      },
+      "wind_speed": {
+        "name": "Wind Speed"
+      },
+      "wind_forecast": {
+        "name": "Wind Forecast"
+      },
+      "wind_avg": {
+        "name": "Average Wind (4h)"
+      },
+      "rcth_sensor": {
+        "name": "RCth"
+      },
+      "rpth_sensor": {
+        "name": "RPth"
+      },
+      "rcth_fast": {
+        "name": "Dynamic RCth"
+      },
+      "recovery_calc_mode": {
+        "name": "Recovery Calculation Mode"
+      },
+      "rp_calc_mode": {
+        "name": "RP Calculation Mode"
+      },
+      "stop_lag_duration": {
+        "name": "Stop Lag Duration"
+      },
+      "night_state": {
+        "name": "Night State"
+      },
+      "state": {
+        "name": "Machine State",
+        "state": {
+          "initializing": "Initializing",
+          "heating_on": "Heating Active",
+          "detecting_lag": "Detecting Lag",
+          "monitoring": "Monitoring",
+          "recovery": "Recovery",
+          "heating_process": "Heating Up",
+          "unknown": "Unknown"
+        }
+      },
+      "time_to_recovery": {
+        "name": "Time to Recovery"
+      },
+      "instance_info": {
+        "name": "Instance ID"
+      },
+      "recovery_start_timestamp": {
+        "name": "Recovery Start Time"
+      },
+      "target_hour_timestamp": {
+        "name": "Target Hour"
+      },
+      "recoverycalc_hour_timestamp": {
+        "name": "Heating Stop Hour"
+      }
+    }
   }
 }

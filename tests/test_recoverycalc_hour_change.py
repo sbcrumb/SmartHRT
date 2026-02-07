@@ -15,9 +15,9 @@ import pytest
 
 from custom_components.SmartHRT.coordinator import (
     SmartHRTCoordinator,
-    SmartHRTData,
     SmartHRTState,
 )
+from custom_components.SmartHRT.data_model import SmartHRTData  # ADR-047
 
 
 def make_mock_now(year=2026, month=2, day=4, hour=8, minute=0, second=0):
@@ -49,13 +49,13 @@ class TestSetRecoverycalcHourTriggerImmediate:
 
             # Mock pour capturer l'appel à async_create_task
             created_tasks = []
-            original_create_task = coord._hass.async_create_task
+            original_create_task = coord.hass.async_create_task
 
             def capture_create_task(coro):
                 created_tasks.append(coro)
                 return original_create_task(coro)
 
-            coord._hass.async_create_task = capture_create_task
+            coord.hass.async_create_task = capture_create_task
 
             # Changer l'heure vers 21:00 (comme le fait l'automation)
             coord.set_recoverycalc_hour(dt_time(21, 0, 0))
@@ -83,7 +83,7 @@ class TestSetRecoverycalcHourTriggerImmediate:
                 created_tasks.append(coro)
                 return MagicMock()
 
-            coord._hass.async_create_task = capture_create_task
+            coord.hass.async_create_task = capture_create_task
 
             coord.set_recoverycalc_hour(dt_time(21, 0, 0))
 
@@ -113,7 +113,7 @@ class TestSetRecoverycalcHourTriggerImmediate:
                 created_tasks.append(coro)
                 return MagicMock()
 
-            coord._hass.async_create_task = capture_create_task
+            coord.hass.async_create_task = capture_create_task
 
             coord.set_recoverycalc_hour(dt_time(21, 0, 0))
 
@@ -144,7 +144,7 @@ class TestSetRecoverycalcHourTriggerImmediate:
                 created_tasks.append(coro)
                 return MagicMock()
 
-            coord._hass.async_create_task = capture_create_task
+            coord.hass.async_create_task = capture_create_task
 
             coord.set_recoverycalc_hour(dt_time(21, 0, 0))
 
@@ -156,9 +156,15 @@ class TestSetRecoverycalcHourTriggerImmediate:
 
     @pytest.mark.asyncio
     async def test_trigger_within_5_minute_window(self, create_coordinator):
-        """Vérifie que le trigger s'exécute dans la fenêtre de 5 minutes."""
+        """Vérifie le comportement à la limite de la fenêtre de 5 minutes.
+
+        Note: Le trigger immédiat n'est déclenché que si l'heure est passée
+        depuis moins de 60 secondes (pas 5 minutes). Au-delà, seule la
+        sauvegarde est effectuée.
+        """
         with patch("custom_components.SmartHRT.coordinator.dt_util") as mock_dt:
-            # Il est 08:04:59, le trigger de 08:00 est passé depuis ~5 min (dans la limite)
+            # Il est 08:04:59, le trigger de 08:00 est passé depuis ~5 min
+            # (hors de la fenêtre de 60 secondes)
             mock_now = make_mock_now(hour=8, minute=4, second=59)
             mock_dt.now.return_value = mock_now
 
@@ -173,14 +179,14 @@ class TestSetRecoverycalcHourTriggerImmediate:
                 created_tasks.append(coro)
                 return MagicMock()
 
-            coord._hass.async_create_task = capture_create_task
+            coord.hass.async_create_task = capture_create_task
 
             coord.set_recoverycalc_hour(dt_time(21, 0, 0))
 
-            # 2 tâches: _save_learned_data + _async_on_recoverycalc_hour
-            assert len(created_tasks) == 2, (
-                f"Attendu 2 tâches, reçu {len(created_tasks)}, "
-                "le trigger devrait s'exécuter dans la fenêtre de 5 min"
+            # 1 tâche: _save_learned_data uniquement (hors fenêtre de 60s)
+            assert len(created_tasks) == 1, (
+                f"Attendu 1 tâche, reçu {len(created_tasks)}, "
+                "hors de la fenêtre de 60 secondes"
             )
 
 

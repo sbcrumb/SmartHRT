@@ -24,7 +24,77 @@ from .types import (
     ThermalConfig,
     RecoveryResult,
     CoefficientUpdateResult,
+    PhysicsGuardResult,
+    PhysicsValidation,
 )
+
+
+# ADR-050: Fonction de validation des contraintes physiques
+def validate_recovery_physics(
+    interior_temp: float | None,
+    exterior_temp: float | None,
+    target_temp: float,
+    rcth: float,
+) -> PhysicsValidation:
+    """Valide les contraintes physiques pour le calcul de recovery.
+
+    ADR-050: Gardes physiques explicites avant les calculs.
+
+    Args:
+        interior_temp: Température intérieure actuelle (°C) ou None
+        exterior_temp: Température extérieure (°C) ou None
+        target_temp: Température cible (°C)
+        rcth: Constante de temps thermique
+
+    Returns:
+        PhysicsValidation avec le résultat et un message explicatif.
+    """
+    # Garde 0: Données manquantes
+    if interior_temp is None:
+        return PhysicsValidation(
+            PhysicsGuardResult.MISSING_DATA,
+            "Température intérieure non disponible",
+            suggested_value=None,
+        )
+
+    if exterior_temp is None:
+        return PhysicsValidation(
+            PhysicsGuardResult.MISSING_DATA,
+            "Température extérieure non disponible",
+            suggested_value=None,
+        )
+
+    # Garde 1: Coefficient valide
+    if rcth <= 0:
+        return PhysicsValidation(
+            PhysicsGuardResult.INVALID_COEFFICIENT,
+            f"rcth doit être positif, reçu: {rcth}",
+        )
+
+    # Garde 2: Déjà à température cible
+    if interior_temp >= target_temp:
+        return PhysicsValidation(
+            PhysicsGuardResult.ALREADY_AT_TARGET,
+            f"Température intérieure ({interior_temp:.1f}°C) >= cible ({target_temp:.1f}°C)",
+            suggested_value=0.0,  # Pas de temps de récupération nécessaire
+        )
+
+    # Garde 3: Pas de perte thermique (extérieur plus chaud que l'intérieur)
+    if exterior_temp >= interior_temp:
+        return PhysicsValidation(
+            PhysicsGuardResult.NO_HEAT_LOSS,
+            f"Extérieur ({exterior_temp:.1f}°C) >= intérieur ({interior_temp:.1f}°C)",
+            suggested_value=0.0,  # Chauffage passif par l'extérieur
+        )
+
+    # Garde 4: Cible inatteignable (extérieur plus chaud que la cible)
+    if target_temp <= exterior_temp:
+        return PhysicsValidation(
+            PhysicsGuardResult.TARGET_UNREACHABLE,
+            f"Cible ({target_temp:.1f}°C) <= extérieur ({exterior_temp:.1f}°C)",
+        )
+
+    return PhysicsValidation(PhysicsGuardResult.VALID)
 
 
 class ThermalSolver:
@@ -149,7 +219,7 @@ class ThermalSolver:
         )
 
     # ─────────────────────────────────────────────────────────────────────────
-    # ADR-005, ADR-022, ADR-031: Calcul du temps de relance
+    # ADR-005, ADR-022, ADR-031, ADR-050: Calcul du temps de relance
     # ─────────────────────────────────────────────────────────────────────────
 
     def calculate_recovery_duration(
@@ -159,6 +229,9 @@ class ThermalSolver:
         now: datetime,
     ) -> RecoveryResult:
         """Calcule l'heure de démarrage de la relance (ADR-005, ADR-022, ADR-031).
+
+        ADR-050: Utilise des gardes physiques explicites pour valider les
+        contraintes avant le calcul au lieu de try/except génériques.
 
         Utilise les prévisions météo et un algorithme itératif avec convergence
         adaptative pour affiner la prédiction. Le calcul prend en compte:
@@ -176,10 +249,7 @@ class ThermalSolver:
         Returns:
             RecoveryResult avec l'heure de démarrage et la durée estimée
         """
-        # Utiliser 17°C par défaut si la température intérieure n'est pas disponible
-        tint = state.interior_temp if state.interior_temp is not None else 17.0
-
-        # Utiliser les prévisions météo
+        # Utiliser les prévisions météo (avec fallback)
         text = (
             state.temperature_forecast_avg
             if state.temperature_forecast_avg
@@ -207,27 +277,127 @@ class ThermalSolver:
         if target_dt < now:
             target_dt += timedelta(days=1)
 
+        # ADR-050: Validation physique explicite
+        # Note: On utilise la température prévue (text) pour la validation
+        tint = state.interior_temp if state.interior_temp is not None else 17.0
+        validation = validate_recovery_physics(
+            interior_temp=state.interior_temp,
+            exterior_temp=text if text else None,
+            target_temp=tsp,
+            rcth=rcth,
+        )
+
+        # Log de diagnostic
+        self._logger.info(
+            "Recovery calc: tint=%.1f°C, text=%.1f°C, tsp=%.1f°C, target=%s, rcth=%.1f, validation=%s",
+            tint,
+            text,
+            tsp,
+            state.target_hour,
+            rcth,
+            validation.result.name,
+        )
+
         time_remaining = (target_dt - now).total_seconds() / 3600
         max_duration = max(time_remaining - 1 / 6, 0)  # 10 min de marge
 
-        # Calcul initial de la durée de relance
-        try:
-            ratio = (rpth + text - tint) / (rpth + text - tsp)
-            duree_relance = min(max(rcth * math.log(max(ratio, 0.1)), 0), max_duration)
-        except (ValueError, ZeroDivisionError):
-            duree_relance = max_duration
+        # ADR-050: Gestion des cas spéciaux selon la validation
+        # NOTE: ALREADY_AT_TARGET n'est PAS un cas d'arrêt en mode MONITORING
+        # car la température va baisser (chauffage coupé). On doit anticiper.
+        if validation.result == PhysicsGuardResult.ALREADY_AT_TARGET:
+            # La température actuelle >= TSP, mais le chauffage est coupé
+            # La température va baisser vers text (extérieur plus froid)
+            # On doit calculer quand démarrer pour remonter à TSP à target_hour
+            if text < tint:
+                # Il y aura des pertes thermiques → continuer le calcul avec prédiction
+                self._logger.info(
+                    "ADR-050: %s mais text=%.1f°C < tint → prédiction de refroidissement",
+                    validation.message,
+                    text,
+                )
+                # Ne pas retourner, laisser le calcul se poursuivre
+            else:
+                # Extérieur plus chaud que TSP → pas besoin de relance
+                self._logger.info(
+                    "ADR-050: %s et text >= tint → démarrage immédiat (now=%s)",
+                    validation.message,
+                    now.strftime("%H:%M:%S"),
+                )
+                return RecoveryResult(
+                    recovery_start_hour=now,
+                    duration_hours=0.0,
+                )
 
-        # ADR-031: Prédiction itérative avec convergence adaptative
-        duree_relance, iterations = self._calculate_with_convergence(
-            tint=tint,
-            text=text,
-            tsp=tsp,
-            rcth=rcth,
-            rpth=rpth,
-            time_remaining=time_remaining,
-            max_duration=max_duration,
-            initial_estimate=duree_relance,
-        )
+        if validation.result == PhysicsGuardResult.NO_HEAT_LOSS:
+            # Extérieur plus chaud → chauffage passif
+            self._logger.info(
+                "ADR-050: %s - pas de relance nécessaire (target_dt=%s)",
+                validation.message,
+                target_dt.strftime("%H:%M"),
+            )
+            return RecoveryResult(
+                recovery_start_hour=target_dt,
+                duration_hours=0.0,
+            )
+
+        if validation.result == PhysicsGuardResult.MISSING_DATA:
+            # Données manquantes → utiliser valeur par défaut sécuritaire
+            self._logger.warning(
+                "ADR-050: %s - utilisation de tint=17°C par défaut",
+                validation.message,
+            )
+            tint = 17.0  # Fallback déjà appliqué, mais on log
+
+        if validation.result in (
+            PhysicsGuardResult.TARGET_UNREACHABLE,
+            PhysicsGuardResult.INVALID_COEFFICIENT,
+        ):
+            # Cas d'erreur → retourner un résultat safe (démarrage à target)
+            self._logger.warning(
+                "ADR-050: Calcul impossible - %s",
+                validation.message,
+            )
+            return RecoveryResult(
+                recovery_start_hour=target_dt,
+                duration_hours=0.0,
+            )
+
+        # ADR-050: Calcul sûr - les gardes garantissent la validité mathématique
+        # En mode prédiction (MONITORING), on doit d'abord estimer la température
+        # au moment de la relance, puis calculer le temps de chauffage nécessaire
+
+        # Si tint >= tsp actuellement, calculer quand tint aura baissé suffisamment
+        if tint >= tsp and text < tint:
+            # Prédiction de refroidissement: T(t) = text + (tint - text) * e^(-t/rcth)
+            # On prédit la température à différents instants jusqu'à target_hour
+            # et on calcule quand démarrer la relance
+            duree_relance, iterations = self._calculate_with_cooling_prediction(
+                tint=tint,
+                text=text,
+                tsp=tsp,
+                rcth=rcth,
+                rpth=rpth,
+                time_remaining=time_remaining,
+                max_duration=max_duration,
+            )
+        else:
+            # Cas normal: tint < tsp, calcul direct de la durée de relance
+            ratio = (rpth + text - tint) / (rpth + text - tsp)
+            # Clamp ratio pour éviter log(0) même après gardes (double sécurité)
+            ratio = max(ratio, 0.001)
+            duree_relance = min(max(rcth * math.log(ratio), 0), max_duration)
+
+            # ADR-031: Prédiction itérative avec convergence adaptative
+            duree_relance, iterations = self._calculate_with_convergence(
+                tint=tint,
+                text=text,
+                tsp=tsp,
+                rcth=rcth,
+                rpth=rpth,
+                time_remaining=time_remaining,
+                max_duration=max_duration,
+                initial_estimate=duree_relance,
+            )
 
         recovery_start_hour = target_dt - timedelta(seconds=int(duree_relance * 3600))
 
@@ -257,7 +427,11 @@ class ThermalSolver:
         max_duration: float,
         initial_estimate: float,
     ) -> tuple[float, int]:
-        """Calcul itératif avec critère de convergence (ADR-031).
+        """Calcul itératif avec critère de convergence (ADR-031, ADR-050).
+
+        ADR-050: Les gardes physiques sont validées en amont, ce qui garantit
+        que rcth > 0 et que les températures sont cohérentes. Les gardes
+        internes protègent contre les cas limites numériques.
 
         Args:
             tint: Température intérieure actuelle
@@ -279,41 +453,56 @@ class ThermalSolver:
 
         for iteration in range(self.config.max_iterations):
             iterations = iteration + 1
-            try:
-                # Estimer la température intérieure au moment du démarrage
-                tint_start = text + (tint - text) / math.exp(
-                    (time_remaining - duree_relance) / rcth
-                )
-                ratio = (rpth + text - tint_start) / (rpth + text - tsp)
-                if ratio > 0.1:
-                    # Moyenne pondérée pour éviter les oscillations
-                    new_estimate = min(
-                        (duree_relance + 2 * max(rcth * math.log(ratio), 0)) / 3,
-                        max_duration,
-                    )
 
-                    # ADR-031: Vérifier la convergence
-                    if (
-                        abs(new_estimate - prev_estimate)
-                        < self.config.convergence_threshold
-                    ):
-                        self._logger.debug(
-                            "Convergence atteinte en %d itérations (delta=%.4f h)",
-                            iteration + 1,
-                            abs(new_estimate - prev_estimate),
-                        )
-                        converged = True
-                        duree_relance = new_estimate
-                        break
+            # ADR-050: Garde contre division par zéro (rcth garanti > 0 par validation amont)
+            exponent = (time_remaining - duree_relance) / rcth
+            # Garde contre overflow exponentiel
+            exponent = max(-100, min(100, exponent))
 
-                    prev_estimate = duree_relance
-                    duree_relance = new_estimate
+            # Estimer la température intérieure au moment du démarrage
+            exp_factor = math.exp(exponent)
+            tint_start = text + (tint - text) / exp_factor
 
-            except (ValueError, ZeroDivisionError):
+            # ADR-050: Garde contre division par zéro
+            denominator = rpth + text - tsp
+            if abs(denominator) < 0.001:
                 self._logger.debug(
-                    "Erreur de calcul à l'itération %d, arrêt anticipé", iteration + 1
+                    "ADR-050: Dénominateur proche de zéro (%f), arrêt itération %d",
+                    denominator,
+                    iteration + 1,
                 )
                 break
+
+            ratio = (rpth + text - tint_start) / denominator
+
+            # ADR-050: Garde contre log de valeur non positive
+            if ratio <= 0.001:
+                self._logger.debug(
+                    "ADR-050: Ratio non valide (%.4f), arrêt itération %d",
+                    ratio,
+                    iteration + 1,
+                )
+                break
+
+            # Moyenne pondérée pour éviter les oscillations
+            new_estimate = min(
+                (duree_relance + 2 * max(rcth * math.log(ratio), 0)) / 3,
+                max_duration,
+            )
+
+            # ADR-031: Vérifier la convergence
+            if abs(new_estimate - prev_estimate) < self.config.convergence_threshold:
+                self._logger.debug(
+                    "Convergence atteinte en %d itérations (delta=%.4f h)",
+                    iteration + 1,
+                    abs(new_estimate - prev_estimate),
+                )
+                converged = True
+                duree_relance = new_estimate
+                break
+
+            prev_estimate = duree_relance
+            duree_relance = new_estimate
 
         if not converged:
             self._logger.warning(
@@ -321,6 +510,115 @@ class ThermalSolver:
                 self.config.max_iterations,
                 self.config.convergence_threshold,
             )
+
+        return duree_relance, iterations
+
+    def _calculate_with_cooling_prediction(
+        self,
+        tint: float,
+        text: float,
+        tsp: float,
+        rcth: float,
+        rpth: float,
+        time_remaining: float,
+        max_duration: float,
+    ) -> tuple[float, int]:
+        """Calcul avec prédiction de refroidissement (tint >= tsp actuellement).
+
+        Quand la température intérieure est >= consigne mais que le chauffage
+        est coupé (mode MONITORING), la température va baisser. On doit prédire
+        quand démarrer la relance pour atteindre TSP à target_hour.
+
+        Algorithme itératif :
+        1. Estimer une durée de relance initiale
+        2. Calculer la température prédite au moment du démarrage de relance
+           T_start = text + (tint - text) * e^(-(time_remaining - duree)/rcth)
+        3. Calculer la durée de relance depuis T_start jusqu'à TSP
+        4. Itérer jusqu'à convergence
+
+        Args:
+            tint: Température intérieure actuelle (>= tsp)
+            text: Température extérieure moyenne prévue
+            tsp: Température de consigne
+            rcth: Coefficient de refroidissement
+            rpth: Coefficient de réchauffement
+            time_remaining: Temps restant avant target (heures)
+            max_duration: Durée maximale autorisée (heures)
+
+        Returns:
+            Tuple (durée de relance calculée, nombre d'itérations)
+        """
+        # Estimation initiale : temps pour remonter de text à tsp
+        # (cas le plus pessimiste où on aurait refroidi jusqu'à text)
+        ratio_init = (rpth + text - text) / (rpth + text - tsp) if rpth > 0 else 1.0
+        ratio_init = max(ratio_init, 0.001)
+        duree_relance = min(max(rcth * math.log(ratio_init), 0.1), max_duration)
+
+        prev_estimate = float("inf")
+        iterations = 0
+
+        for iteration in range(self.config.max_iterations):
+            iterations = iteration + 1
+
+            # Temps de refroidissement avant le démarrage de la relance
+            cooling_time = time_remaining - duree_relance
+            if cooling_time <= 0:
+                # Pas assez de temps pour refroidir, démarrage immédiat
+                duree_relance = time_remaining
+                break
+
+            # Température prédite au moment du démarrage de la relance
+            # T(t) = text + (tint - text) * e^(-t/rcth)
+            exponent = -cooling_time / rcth
+            exponent = max(-100, min(100, exponent))  # Garde contre overflow
+            tint_at_start = text + (tint - text) * math.exp(exponent)
+
+            self._logger.debug(
+                "Cooling prediction iter %d: cooling_time=%.2fh, tint_at_start=%.1f°C",
+                iterations,
+                cooling_time,
+                tint_at_start,
+            )
+
+            # Si la température prédite est encore >= TSP, pas besoin de relance
+            if tint_at_start >= tsp:
+                # La température ne baissera pas assez, on démarre à target_hour
+                duree_relance = 0.0
+                break
+
+            # Calculer la durée de relance depuis tint_at_start jusqu'à TSP
+            denominator = rpth + text - tsp
+            if abs(denominator) < 0.001:
+                break
+
+            ratio = (rpth + text - tint_at_start) / denominator
+            if ratio <= 0.001:
+                break
+
+            new_estimate = min(max(rcth * math.log(ratio), 0), max_duration)
+
+            # Moyenne pondérée pour éviter les oscillations
+            new_estimate = (duree_relance + 2 * new_estimate) / 3
+
+            # Vérifier la convergence
+            if abs(new_estimate - prev_estimate) < self.config.convergence_threshold:
+                self._logger.debug(
+                    "Cooling prediction convergence en %d itérations",
+                    iterations,
+                )
+                duree_relance = new_estimate
+                break
+
+            prev_estimate = duree_relance
+            duree_relance = new_estimate
+
+        self._logger.info(
+            "Cooling prediction: durée=%.2fh après %d itérations (tint=%.1f → %.1f°C)",
+            duree_relance,
+            iterations,
+            tint,
+            tint_at_start if iterations > 0 else tint,
+        )
 
         return duree_relance, iterations
 

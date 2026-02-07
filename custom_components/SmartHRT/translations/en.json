@@ -1,0 +1,225 @@
+{
+  "title": "SmartHRT",
+  "config": {
+    "flow_title": "SmartHRT configuration",
+    "step": {
+      "user": {
+        "title": "Identification",
+        "description": "Configure your SmartHRT integration",
+        "data": {
+          "name": "Name"
+        },
+        "data_description": {
+          "name": "Integration name"
+        }
+      },
+      "sensors": {
+        "title": "Sensors configuration",
+        "description": "Configure sensors and heating parameters",
+        "data": {
+          "target_hour": "Target hour",
+          "recoverycalc_hour": "Heating stop hour",
+          "sensor_interior_temperature": "Interior temperature sensor",
+          "weather_entity": "Weather source (outdoor temperature)",
+          "tsp": "Set Point"
+        },
+        "data_description": {
+          "target_hour": "Wake up time (e.g. 6:00)",
+          "recoverycalc_hour": "Time when heating stops (e.g. 23:00)",
+          "sensor_interior_temperature": "Room temperature sensor (e.g. sensor.room_temperature)",
+          "weather_entity": "Weather integration providing outdoor temperature and wind speed (e.g. weather.home, weather.meteo_france).",
+          "tsp": "Target temperature (13-26°C)"
+        }
+      }
+    },
+    "error": {
+      "weather_not_found": "Weather entity not found",
+      "weather_incompatible": "Weather entity does not support forecasts",
+      "sensor_not_found": "Temperature sensor not found",
+      "tsp_out_of_range": "Target temperature out of range (13-26°C)",
+      "invalid_time_sequence": "Heating stop hour must precede target hour",
+      "invalid_name": "Invalid name",
+      "unknown_error": "Configuration error"
+    }
+  },
+  "options": {
+    "flow_title": "SmartHRT options",
+    "step": {
+      "init": {
+        "title": "SmartHRT Configuration",
+        "description": "Modify your smart heating configuration",
+        "data": {
+          "name": "Name",
+          "target_hour": "Target hour",
+          "recoverycalc_hour": "Heating stop hour",
+          "sensor_interior_temperature": "Interior temperature sensor",
+          "weather_entity": "Weather source (outdoor temperature)",
+          "tsp": "Set Point"
+        },
+        "data_description": {
+          "name": "Integration name",
+          "target_hour": "Wake up time (e.g. 6:00)",
+          "recoverycalc_hour": "Time when heating stops (e.g. 23:00)",
+          "sensor_interior_temperature": "Room temperature sensor (e.g. sensor.room_temperature)",
+          "weather_entity": "Weather integration providing outdoor temperature and wind speed (e.g. weather.home, weather.meteo_france).",
+          "tsp": "Target temperature (13-26°C)"
+        }
+      }
+    }
+  },
+  "services": {
+    "calculate_recovery_time": {
+      "name": "Calculate Recovery Time",
+      "description": "Calculates the heating recovery start time based on thermal parameters.",
+      "fields": {
+        "entry_id": {
+          "name": "Entry ID",
+          "description": "The config entry ID (optional, uses first available if not specified)."
+        }
+      }
+    },
+    "calculate_recovery_update_time": {
+      "name": "Calculate Recovery Update Time",
+      "description": "Calculates when the next recovery time update should occur.",
+      "fields": {
+        "entry_id": {
+          "name": "Entry ID",
+          "description": "The config entry ID (optional, uses first available if not specified)."
+        }
+      }
+    },
+    "calculate_rcth_fast": {
+      "name": "Calculate RCth Fast",
+      "description": "Calculates the dynamic evolution of RCth before the recovery starts.",
+      "fields": {
+        "entry_id": {
+          "name": "Entry ID",
+          "description": "The config entry ID (optional, uses first available if not specified)."
+        }
+      }
+    },
+    "on_heating_stop": {
+      "name": "On Heating Stop",
+      "description": "Triggers actions when heating stops (records temperatures and timestamps for calculations).",
+      "fields": {
+        "entry_id": {
+          "name": "Entry ID",
+          "description": "The config entry ID (optional, uses first available if not specified)."
+        }
+      }
+    },
+    "on_recovery_start": {
+      "name": "On Recovery Start",
+      "description": "Triggers actions at the start of heating recovery (records temperatures and calculates RCth).",
+      "fields": {
+        "entry_id": {
+          "name": "Entry ID",
+          "description": "The config entry ID (optional, uses first available if not specified)."
+        }
+      }
+    },
+    "on_recovery_end": {
+      "name": "On Recovery End",
+      "description": "Triggers actions at the end of heating recovery (records temperatures and calculates RPth).",
+      "fields": {
+        "entry_id": {
+          "name": "Entry ID",
+          "description": "The config entry ID (optional, uses first available if not specified)."
+        }
+      }
+    },
+    "reset_learning": {
+      "name": "Reset Learning",
+      "description": "Resets all learned thermal coefficients (RCth, RPth) to their default values.",
+      "fields": {
+        "entry_id": {
+          "name": "Entry ID",
+          "description": "The config entry ID (optional, uses first available if not specified)."
+        }
+      }
+    },
+    "trigger_calculation": {
+      "name": "Trigger Calculation",
+      "description": "Manually triggers an immediate recalculation of the recovery time.",
+      "fields": {
+        "entry_id": {
+          "name": "Entry ID",
+          "description": "The config entry ID (optional, uses first available if not specified)."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "interior_temp": {
+        "name": "Interior Temperature"
+      },
+      "exterior_temp": {
+        "name": "Exterior Temperature"
+      },
+      "windchill": {
+        "name": "Wind Chill Temperature"
+      },
+      "temp_forecast": {
+        "name": "Temperature Forecast"
+      },
+      "wind_speed": {
+        "name": "Wind Speed"
+      },
+      "wind_forecast": {
+        "name": "Wind Forecast"
+      },
+      "wind_avg": {
+        "name": "Average Wind (4h)"
+      },
+      "rcth_sensor": {
+        "name": "RCth"
+      },
+      "rpth_sensor": {
+        "name": "RPth"
+      },
+      "rcth_fast": {
+        "name": "Dynamic RCth"
+      },
+      "recovery_calc_mode": {
+        "name": "Recovery Calculation Mode"
+      },
+      "rp_calc_mode": {
+        "name": "RP Calculation Mode"
+      },
+      "stop_lag_duration": {
+        "name": "Stop Lag Duration"
+      },
+      "night_state": {
+        "name": "Night State"
+      },
+      "state": {
+        "name": "Machine State",
+        "state": {
+          "initializing": "Initializing",
+          "heating_on": "Heating Active",
+          "detecting_lag": "Detecting Lag",
+          "monitoring": "Monitoring",
+          "recovery": "Recovery",
+          "heating_process": "Heating Up",
+          "unknown": "Unknown"
+        }
+      },
+      "time_to_recovery": {
+        "name": "Time to Recovery"
+      },
+      "instance_info": {
+        "name": "Instance ID"
+      },
+      "recovery_start_timestamp": {
+        "name": "Recovery Start Time"
+      },
+      "target_hour_timestamp": {
+        "name": "Target Hour"
+      },
+      "recoverycalc_hour_timestamp": {
+        "name": "Heating Stop Hour"
+      }
+    }
+  }
+}

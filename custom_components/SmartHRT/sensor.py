@@ -5,6 +5,7 @@ ADR implémentées dans ce module:
 - ADR-014: Format des dates en fuseau local (dt_util.as_local())
 - ADR-027: Utilisation de CoordinatorEntity pour synchronisation automatique
 - ADR-030: Simplification avec SensorEntityDescription
+- ADR-052: Internationalisation native (translation_key au lieu de name)
 """
 
 from __future__ import annotations
@@ -39,7 +40,8 @@ from .const import (
     CONF_NAME,
     DATA_COORDINATOR,
 )
-from .coordinator import SmartHRTCoordinator, SmartHRTData
+from .coordinator import SmartHRTCoordinator
+from .data_model import SmartHRTData  # ADR-047: Import depuis data_model
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -66,7 +68,7 @@ SENSOR_DESCRIPTIONS: tuple[SmartHRTSensorDescription, ...] = (
     # Températures
     SmartHRTSensorDescription(
         key="interior_temp",
-        name="Température intérieure",
+        translation_key="interior_temp",
         icon="mdi:home-thermometer",
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
@@ -76,7 +78,7 @@ SENSOR_DESCRIPTIONS: tuple[SmartHRTSensorDescription, ...] = (
     ),
     SmartHRTSensorDescription(
         key="exterior_temp",
-        name="Température extérieure",
+        translation_key="exterior_temp",
         icon="mdi:thermometer",
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
@@ -86,7 +88,7 @@ SENSOR_DESCRIPTIONS: tuple[SmartHRTSensorDescription, ...] = (
     ),
     SmartHRTSensorDescription(
         key="windchill",
-        name="Température ressentie",
+        translation_key="windchill",
         icon="mdi:snowflake-thermometer",
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
@@ -96,7 +98,7 @@ SENSOR_DESCRIPTIONS: tuple[SmartHRTSensorDescription, ...] = (
     ),
     SmartHRTSensorDescription(
         key="temp_forecast",
-        name="Prévision température",
+        translation_key="temp_forecast",
         icon="mdi:thermometer",
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
@@ -107,7 +109,7 @@ SENSOR_DESCRIPTIONS: tuple[SmartHRTSensorDescription, ...] = (
     # Vent
     SmartHRTSensorDescription(
         key="wind_speed",
-        name="Vitesse du vent",
+        translation_key="wind_speed",
         icon="mdi:weather-windy",
         device_class=SensorDeviceClass.WIND_SPEED,
         state_class=SensorStateClass.MEASUREMENT,
@@ -117,7 +119,7 @@ SENSOR_DESCRIPTIONS: tuple[SmartHRTSensorDescription, ...] = (
     ),
     SmartHRTSensorDescription(
         key="wind_forecast",
-        name="Prévision vent",
+        translation_key="wind_forecast",
         icon="mdi:weather-windy",
         device_class=SensorDeviceClass.WIND_SPEED,
         state_class=SensorStateClass.MEASUREMENT,
@@ -127,7 +129,7 @@ SENSOR_DESCRIPTIONS: tuple[SmartHRTSensorDescription, ...] = (
     ),
     SmartHRTSensorDescription(
         key="wind_avg",
-        name="Vent moyen (4h)",
+        translation_key="wind_avg",
         icon="mdi:weather-windy",
         device_class=SensorDeviceClass.WIND_SPEED,
         state_class=SensorStateClass.MEASUREMENT,
@@ -138,7 +140,7 @@ SENSOR_DESCRIPTIONS: tuple[SmartHRTSensorDescription, ...] = (
     # Coefficients thermiques
     SmartHRTSensorDescription(
         key="rcth_sensor",
-        name="RCth",
+        translation_key="rcth_sensor",
         icon="mdi:home-battery-outline",
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfTime.HOURS,
@@ -152,7 +154,7 @@ SENSOR_DESCRIPTIONS: tuple[SmartHRTSensorDescription, ...] = (
     ),
     SmartHRTSensorDescription(
         key="rpth_sensor",
-        name="RPth",
+        translation_key="rpth_sensor",
         icon="mdi:home-lightning-bolt-outline",
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
@@ -166,7 +168,7 @@ SENSOR_DESCRIPTIONS: tuple[SmartHRTSensorDescription, ...] = (
     ),
     SmartHRTSensorDescription(
         key="rcth_fast",
-        name="RCth dynamique",
+        translation_key="rcth_fast",
         icon="mdi:home-battery-outline",
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfTime.HOURS,
@@ -175,14 +177,14 @@ SENSOR_DESCRIPTIONS: tuple[SmartHRTSensorDescription, ...] = (
     # Modes et flags
     SmartHRTSensorDescription(
         key="recovery_calc_mode",
-        name="Mode calcul relance",
+        translation_key="recovery_calc_mode",
         icon="mdi:clock-end",
         value_fn=lambda data: "on" if data.recovery_calc_mode else "off",
         round_digits=None,
     ),
     SmartHRTSensorDescription(
         key="rp_calc_mode",
-        name="Mode calcul RP",
+        translation_key="rp_calc_mode",
         icon="mdi:home-lightning-bolt-outline",
         value_fn=lambda data: "on" if data.rp_calc_mode else "off",
         round_digits=None,
@@ -190,7 +192,7 @@ SENSOR_DESCRIPTIONS: tuple[SmartHRTSensorDescription, ...] = (
     # Durées
     SmartHRTSensorDescription(
         key="stop_lag_duration",
-        name="Durée lag arrêt",
+        translation_key="stop_lag_duration",
         icon="mdi:timer-outline",
         native_unit_of_measurement="s",
         value_fn=lambda data: data.stop_lag_duration,
@@ -287,7 +289,7 @@ class SmartHRTNightStateSensor(SmartHRTBaseSensor):
     Ce sensor accède à l'entité externe sun.sun, donc non-factorisable.
     """
 
-    _attr_name = "État nuit"
+    _attr_translation_key = "night_state"
 
     def __init__(
         self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
@@ -313,7 +315,8 @@ class SmartHRTNightStateSensor(SmartHRTBaseSensor):
 class SmartHRTStateSensor(SmartHRTBaseSensor):
     """Sensor exposant l'état courant de la machine à états SmartHRT.
 
-    Ce sensor a une logique d'icône et de labels dynamiques.
+    Ce sensor a une logique d'icône dynamique.
+    Les labels d'état sont gérés via translation_key (ADR-052 i18n).
     """
 
     STATE_ICONS = {
@@ -322,17 +325,20 @@ class SmartHRTStateSensor(SmartHRTBaseSensor):
         "monitoring": "mdi:eye",
         "recovery": "mdi:clock-fast",
         "heating_process": "mdi:fire",
+        "initializing": "mdi:loading",
     }
 
-    STATE_LABELS = {
-        "heating_on": "Chauffage actif",
-        "detecting_lag": "Détection lag",
-        "monitoring": "Surveillance",
-        "recovery": "Relance",
-        "heating_process": "Montée en température",
-    }
-
-    _attr_name = "État machine"
+    _attr_translation_key = "state"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = [
+        "initializing",
+        "heating_on",
+        "detecting_lag",
+        "monitoring",
+        "recovery",
+        "heating_process",
+        "unknown",
+    ]
 
     def __init__(
         self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
@@ -356,7 +362,7 @@ class SmartHRTTimeToRecoverySensor(SmartHRTBaseSensor):
     Appelle une méthode du coordinator, non-factorisable directement.
     """
 
-    _attr_name = "Temps avant relance"
+    _attr_translation_key = "time_to_recovery"
     _attr_icon = "mdi:clock-start"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = UnitOfTime.HOURS
@@ -387,7 +393,7 @@ class SmartHRTInstanceInfoSensor(SmartHRTBaseSensor):
     """Sensor de diagnostic exposant l'entry_id de l'instance."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_name = "ID Instance"
+    _attr_translation_key = "instance_info"
     _attr_icon = "mdi:identifier"
 
     def __init__(
@@ -424,7 +430,7 @@ class SmartHRTTimestampSensor(SmartHRTBaseSensor):
 class SmartHRTRecoveryStartTimestampSensor(SmartHRTTimestampSensor):
     """Sensor timestamp pour l'heure de relance."""
 
-    _attr_name = "Heure de relance"
+    _attr_translation_key = "recovery_start_timestamp"
     _attr_icon = "mdi:clock-start"
 
     def __init__(
@@ -443,7 +449,7 @@ class SmartHRTRecoveryStartTimestampSensor(SmartHRTTimestampSensor):
 class SmartHRTTargetHourTimestampSensor(SmartHRTTimestampSensor):
     """Sensor timestamp pour l'heure cible/réveil."""
 
-    _attr_name = "Heure cible (timestamp)"
+    _attr_translation_key = "target_hour_timestamp"
     _attr_icon = "mdi:clock-end"
 
     def __init__(
@@ -471,7 +477,7 @@ class SmartHRTTargetHourTimestampSensor(SmartHRTTimestampSensor):
 class SmartHRTRecoveryCalcHourTimestampSensor(SmartHRTTimestampSensor):
     """Sensor timestamp pour l'heure de coupure chauffage."""
 
-    _attr_name = "Heure coupure (timestamp)"
+    _attr_translation_key = "recoverycalc_hour_timestamp"
     _attr_icon = "mdi:clock-in"
 
     def __init__(

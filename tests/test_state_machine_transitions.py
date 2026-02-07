@@ -23,9 +23,9 @@ from custom_components.SmartHRT.const import (
 )
 from custom_components.SmartHRT.coordinator import (
     SmartHRTCoordinator,
-    SmartHRTData,
     SmartHRTState,
 )
+from custom_components.SmartHRT.data_model import SmartHRTData  # ADR-047
 
 
 class TestTransitionHeatingOnToDetectingLag:

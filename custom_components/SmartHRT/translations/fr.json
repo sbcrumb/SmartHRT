@@ -139,5 +139,78 @@
         }
       }
     }
+  },
+  "entity": {
+    "sensor": {
+      "interior_temp": {
+        "name": "Température intérieure"
+      },
+      "exterior_temp": {
+        "name": "Température extérieure"
+      },
+      "windchill": {
+        "name": "Température ressentie"
+      },
+      "temp_forecast": {
+        "name": "Prévision température"
+      },
+      "wind_speed": {
+        "name": "Vitesse du vent"
+      },
+      "wind_forecast": {
+        "name": "Prévision vent"
+      },
+      "wind_avg": {
+        "name": "Vent moyen (4h)"
+      },
+      "rcth_sensor": {
+        "name": "RCth"
+      },
+      "rpth_sensor": {
+        "name": "RPth"
+      },
+      "rcth_fast": {
+        "name": "RCth dynamique"
+      },
+      "recovery_calc_mode": {
+        "name": "Mode calcul relance"
+      },
+      "rp_calc_mode": {
+        "name": "Mode calcul RP"
+      },
+      "stop_lag_duration": {
+        "name": "Durée lag arrêt"
+      },
+      "night_state": {
+        "name": "État nuit"
+      },
+      "state": {
+        "name": "État machine",
+        "state": {
+          "initializing": "Initialisation",
+          "heating_on": "Chauffage actif",
+          "detecting_lag": "Détection lag",
+          "monitoring": "Surveillance",
+          "recovery": "Relance",
+          "heating_process": "Montée en température",
+          "unknown": "Inconnu"
+        }
+      },
+      "time_to_recovery": {
+        "name": "Temps avant relance"
+      },
+      "instance_info": {
+        "name": "ID Instance"
+      },
+      "recovery_start_timestamp": {
+        "name": "Heure de relance"
+      },
+      "target_hour_timestamp": {
+        "name": "Heure cible"
+      },
+      "recoverycalc_hour_timestamp": {
+        "name": "Heure coupure chauffage"
+      }
+    }
   }
 }

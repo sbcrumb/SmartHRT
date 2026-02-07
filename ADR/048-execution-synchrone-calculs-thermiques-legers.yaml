@@ -1,6 +1,6 @@
 id: 048
 title: "Exécution Synchrone des Calculs Thermiques Légers"
-status: "Proposé"
+status: "Accepté"
 date: "2026-02-07"
 context: |
   Les calculs thermiques (`calculate_recovery_duration`, `calculate_windchill`, 

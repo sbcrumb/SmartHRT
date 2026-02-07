@@ -27,10 +27,14 @@ class LoggerProtocol(Protocol):
 class SmartHRTState(StrEnum):
     """SmartHRT state machine states.
 
+    ADR-049: Added INITIALIZING as entry point after (re)start.
+
     Lifecycle:
+    INITIALIZING -> any state (restoration)
     HEATING_ON -> DETECTING_LAG -> MONITORING -> RECOVERY -> HEATING_PROCESS -> HEATING_ON
     """
 
+    INITIALIZING = "initializing"  # ADR-049: État initial après (re)démarrage
     HEATING_ON = "heating_on"
     DETECTING_LAG = "detecting_lag"
     MONITORING = "monitoring"
@@ -40,6 +44,7 @@ class SmartHRTState(StrEnum):
 
 # State flags: maps state -> (recovery_calc_mode, rp_calc_mode, temp_lag_detection_active)
 STATE_FLAGS: dict[SmartHRTState, tuple[bool, bool, bool]] = {
+    SmartHRTState.INITIALIZING: (False, False, False),  # ADR-049
     SmartHRTState.HEATING_ON: (False, False, False),
     SmartHRTState.DETECTING_LAG: (False, False, True),
     SmartHRTState.MONITORING: (True, False, False),
@@ -47,7 +52,15 @@ STATE_FLAGS: dict[SmartHRTState, tuple[bool, bool, bool]] = {
     SmartHRTState.HEATING_PROCESS: (False, True, False),
 }
 
+# ADR-049: INITIALIZING peut transitionner vers n'importe quel état (restauration)
 VALID_TRANSITIONS: dict[SmartHRTState, set[SmartHRTState]] = {
+    SmartHRTState.INITIALIZING: {
+        SmartHRTState.HEATING_ON,
+        SmartHRTState.DETECTING_LAG,
+        SmartHRTState.MONITORING,
+        SmartHRTState.RECOVERY,
+        SmartHRTState.HEATING_PROCESS,
+    },
     SmartHRTState.HEATING_ON: {SmartHRTState.DETECTING_LAG},
     SmartHRTState.DETECTING_LAG: {SmartHRTState.MONITORING},
     SmartHRTState.MONITORING: {SmartHRTState.RECOVERY, SmartHRTState.HEATING_PROCESS},
@@ -56,8 +69,20 @@ VALID_TRANSITIONS: dict[SmartHRTState, set[SmartHRTState]] = {
 }
 
 # ADR-046: Mapping déclaratif transition → actions
+# ADR-049: Transitions depuis INITIALIZING pour restauration avec effets de bord
 # Ordre recommandé: Snapshots, Annulation timers, Calculs, Planification, Sauvegarde
 TRANSITION_ACTIONS: dict[tuple[SmartHRTState, SmartHRTState], list[Action]] = {
+    # ADR-049: Transitions depuis INITIALIZING (restauration après redémarrage)
+    # Ces transitions reprogramment les timers nécessaires
+    (SmartHRTState.INITIALIZING, SmartHRTState.HEATING_ON): [],
+    (SmartHRTState.INITIALIZING, SmartHRTState.DETECTING_LAG): [],
+    (SmartHRTState.INITIALIZING, SmartHRTState.MONITORING): [
+        Action.SCHEDULE_RECOVERY_UPDATE,
+    ],
+    (SmartHRTState.INITIALIZING, SmartHRTState.RECOVERY): [
+        Action.SCHEDULE_RECOVERY_UPDATE,
+    ],
+    (SmartHRTState.INITIALIZING, SmartHRTState.HEATING_PROCESS): [],
     # HEATING_ON → DETECTING_LAG: Démarrage du cycle, pas d'action spécifique
     (SmartHRTState.HEATING_ON, SmartHRTState.DETECTING_LAG): [],
     # DETECTING_LAG → MONITORING: Planifier la mise à jour recovery
@@ -224,12 +249,16 @@ class SmartHRTStateMachine:
             actions=actions,
         )
 
-    def force_state(
+    def _force_state_unsafe(
         self, new_state: SmartHRTState, run_callbacks: bool = False
     ) -> None:
         """Force a state change without validating transitions.
 
-        Use sparingly - mainly for restoration after restart.
+        ADR-049: Renamed from force_state to discourage direct use.
+
+        ⛔ USAGE INTERDIT sauf pour les tests unitaires.
+        Pour la restauration d'état, utiliser transition_to depuis
+        INITIALIZING qui garantit l'exécution des callbacks appropriés.
         """
         if new_state == self._state:
             return
@@ -250,3 +279,6 @@ class SmartHRTStateMachine:
                     self._log("warning", "Enter callback error during force: %s", e)
 
         self._log("info", "State forced %s → %s", old_state.value, new_state.value)
+
+    # ADR-049: Alias pour compatibilité descendante (tests)
+    force_state = _force_state_unsafe

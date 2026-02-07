@@ -148,16 +148,14 @@ class TestServiceIntegration:
 
     @pytest.mark.asyncio
     async def test_service_handler_pattern_is_correct(self):
-        """Vérifie que le pattern d'appel dans services.py est correct.
+        """Vérifie que les services ADR-043 utilisent les méthodes façade.
 
-        Le handler doit appeler:
-            await coord._async_on_recoverycalc_hour()
-
-        Et NON:
-            await coord._on_recoverycalc_hour(None)  # TypeError!
+        Après ADR-043, les services essentiels appellent les méthodes façade:
+        - async_trigger_calculation
+        - async_manual_stop_heating
+        - async_start_heating_cycle
+        - etc.
         """
-        # Lire le fichier services.py et vérifier le pattern
-        import ast
         from pathlib import Path
 
         services_path = Path("custom_components/SmartHRT/services.py")
@@ -167,14 +165,13 @@ class TestServiceIntegration:
 
         content = services_path.read_text()
 
-        # Vérifier que l'ancien pattern bugué n'est plus présent
-        assert "_on_recoverycalc_hour(None)" not in content, (
-            "L'ancien pattern bugué '_on_recoverycalc_hour(None)' "
-            "est encore présent dans services.py"
+        # ADR-043: Vérifier que l'ancien handler bugué n'est plus présent
+        assert "_on_recoverycalc_hour" not in content, (
+            "L'ancien handler '_on_recoverycalc_hour' ne devrait plus exister "
+            "après ADR-043 (services simplifiés)"
         )
 
-        # Vérifier que le nouveau pattern correct est présent
-        assert "_async_on_recoverycalc_hour()" in content, (
-            "Le pattern correct '_async_on_recoverycalc_hour()' "
-            "n'est pas présent dans services.py"
-        )
+        # ADR-043: Vérifier que les méthodes façade sont utilisées
+        assert (
+            "async_trigger_calculation" in content
+        ), "La méthode façade 'async_trigger_calculation' devrait être utilisée"

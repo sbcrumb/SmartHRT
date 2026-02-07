@@ -2,9 +2,25 @@
 
 ADR implémentées dans ce module:
 - ADR-041: PERSISTED_FIELDS supprimé, remplacé par SmartHRTData.as_dict/from_dict
+- ADR-051: TimerKey pour la gestion centralisée des timers
 """
 
+from enum import StrEnum
+
 from homeassistant.const import Platform
+
+
+class TimerKey(StrEnum):
+    """Clés des timers gérés par le système (ADR-051).
+
+    Utilisées avec TimerManager pour identifier les timers de manière unique.
+    """
+
+    RECOVERYCALC_HOUR = "recoverycalc_hour"
+    TARGET_HOUR = "target_hour"
+    RECOVERY_START = "recovery_start"
+    RECOVERY_UPDATE = "recovery_update"
+
 
 DOMAIN = "smarthrt"
 PLATFORMS: list[Platform] = [

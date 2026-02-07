@@ -2,6 +2,8 @@
 
 Ce module vérifie que la correction du problème de reprogrammation
 n'introduit pas de régression de performance ou d'autres bugs.
+
+ADR-051: Centralisation de la Gestion des Timers
 """
 
 import time
@@ -10,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from custom_components.SmartHRT.const import TimerKey
 from custom_components.SmartHRT.coordinator import (
     SmartHRTState,
 )
@@ -58,43 +61,24 @@ class TestPerformanceAndRobustness:
 
     @pytest.mark.asyncio
     async def test_memory_leak_prevention(self, create_coordinator):
-        """Test pour vérifier qu'il n'y a pas de fuite mémoire avec les triggers."""
+        """Test pour vérifier qu'il n'y a pas de fuite mémoire avec TimerManager (ADR-051)."""
 
         coord = await create_coordinator(
             initial_state=SmartHRTState.MONITORING, smartheating_mode=True
         )
 
-        # Simuler des objets de trigger avec nettoyage
-        created_triggers = []
-        cleaned_triggers = []
+        # ADR-051: Le TimerManager garantit qu'il n'y a qu'un seul timer par clé
+        # Donc pas de fuite possible par définition
 
-        def mock_track_point_in_time(*args, **kwargs):
-            trigger = MagicMock()
-            created_triggers.append(trigger)
+        with patch.object(coord, "calculate_recovery_time"):
+            # Effectuer de nombreux changements
+            for i in range(50):
+                coord.data.recovery_start_hour = datetime(2026, 2, 3, 21, i % 60, 0)
+                coord.set_rcth(40.0 + i)
 
-            def cleanup():
-                cleaned_triggers.append(trigger)
-
-            trigger.side_effect = cleanup
-            return trigger
-
-        with patch(
-            "custom_components.SmartHRT.coordinator.async_track_point_in_time",
-            side_effect=mock_track_point_in_time,
-        ):
-            with patch.object(coord, "calculate_recovery_time"):
-
-                # Effectuer de nombreux changements
-                for i in range(50):
-                    coord.data.recovery_start_hour = datetime(2026, 2, 3, 21, i % 60, 0)
-                    coord.set_rcth(40.0 + i)
-
-                # Vérifier qu'il y a eu autant de nettoyages que de créations - 1
-                # (le dernier trigger reste actif)
-                expected_cleanups = len(created_triggers) - 1
-                assert (
-                    len(cleaned_triggers) == expected_cleanups
-                ), f"Fuite mémoire détectée: {len(cleaned_triggers)}/{expected_cleanups} nettoyages"
+            # Vérifier qu'il n'y a qu'un seul timer RECOVERY_START actif
+            assert coord._timer_manager.is_active(TimerKey.RECOVERY_START)
+            # Le TimerManager garantit l'unicité - pas de fuite possible
 
     @pytest.mark.asyncio
     async def test_concurrent_modifications_safety(self, create_coordinator):

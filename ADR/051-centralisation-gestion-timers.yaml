@@ -1,6 +1,6 @@
 id: 051
 title: "Centralisation de la Gestion des Timers"
-status: "Proposé"
+status: "Accepté"
 date: "2026-02-07"
 context: |
   Les gestionnaires de désabonnement (unsubscribe callbacks) pour les timers 

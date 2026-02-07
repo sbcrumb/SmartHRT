@@ -1,6 +1,6 @@
 id: 049
 title: "Suppression du Forçage d'État et Transitions Explicites"
-status: "Proposé"
+status: "Accepté"
 date: "2026-02-07"
 context: |
   La méthode `force_state` est utilisée pour restaurer l'état après un 

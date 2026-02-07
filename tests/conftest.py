@@ -23,9 +23,9 @@ from custom_components.SmartHRT.const import (
 )
 from custom_components.SmartHRT.coordinator import (
     SmartHRTCoordinator,
-    SmartHRTData,
     SmartHRTState,
 )
+from custom_components.SmartHRT.data_model import SmartHRTData  # ADR-047
 
 
 @dataclass
@@ -247,6 +247,11 @@ def create_coordinator(mock_hass, mock_entry, mock_store):
                 "rp_calc_mode",
                 "temp_lag_detection_active",
             }
+            # Support pour data_overrides={...} comme paramètre nommé (legacy pattern)
+            if "data_overrides" in data_overrides:
+                nested_overrides = data_overrides.pop("data_overrides")
+                data_overrides.update(nested_overrides)
+                
             for key, value in data_overrides.items():
                 if key not in computed_flags:
                     setattr(coordinator.data, key, value)

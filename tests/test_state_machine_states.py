@@ -77,7 +77,7 @@ class TestStateCycleOrder:
 
     def test_heating_on_is_initial_state(self):
         """Vérifie que HEATING_ON est l'état initial logique."""
-        from custom_components.SmartHRT.coordinator import SmartHRTData
+        from custom_components.SmartHRT.data_model import SmartHRTData  # ADR-047
 
         data = SmartHRTData()
         assert data.current_state == SmartHRTState.HEATING_ON

@@ -3,8 +3,10 @@
 {
   "name": "cbarban/hass-SmartHRT",
 
-  // Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
-  "image": "mcr.microsoft.com/devcontainers/python:3.13-bookworm",
+  // Use custom Dockerfile to fix Yarn GPG key issue before installing features
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
   "features": {
     "ghcr.io/devcontainers-extra/features/exa:1": {},
     "ghcr.io/devcontainers-extra/features/ffmpeg-apt-get:1": {}
