@@ -12,8 +12,8 @@ input_number:
     name: "Réglage Température Fictive"
     initial: 20
     min: -20
-    max: 50
-    step: 0.5
+    max: 30
+    step: 0.1
     mode: slider
     icon: mdi:thermostat
 

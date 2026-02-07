@@ -459,6 +459,11 @@ class SmartHRTCoordinator:
         )
 
         # Trigger pour recovery_start_hour (démarrage relance)
+        # Annuler d'abord le trigger géré par _schedule_recovery_start pour éviter les doublons
+        if self._unsub_recovery_start:
+            self._unsub_recovery_start()
+            self._unsub_recovery_start = None
+
         if self.data.recovery_start_hour:
             recovery_start = self.data.recovery_start_hour
             if recovery_start.tzinfo is None:
