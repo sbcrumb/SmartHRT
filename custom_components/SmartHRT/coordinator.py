@@ -237,7 +237,7 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
             default_rpth=DEFAULT_RPTH,
             default_relaxation_factor=DEFAULT_RELAXATION_FACTOR,
         )
-        self._thermal_solver = ThermalSolver(thermal_config)
+        self._thermal_solver = ThermalSolver(thermal_config, logger=_LOGGER)
 
     def _log_prefix(self) -> str:
         """Retourne un préfixe pour les logs incluant le nom et entry_id de l'instance.

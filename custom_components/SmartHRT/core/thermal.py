@@ -18,8 +18,6 @@ import math
 from datetime import datetime, timedelta, time as dt_time
 from typing import TYPE_CHECKING, Tuple
 
-_LOGGER = logging.getLogger(__name__)
-
 from .types import (
     ThermalState,
     ThermalCoefficients,
@@ -48,14 +46,21 @@ class ThermalSolver:
     ADR-031: Optimisation algorithmique avec critère de convergence adaptatif.
     """
 
-    def __init__(self, config: ThermalConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: ThermalConfig | None = None,
+        logger: logging.Logger | None = None,
+    ) -> None:
         """Initialise le solveur avec une configuration optionnelle.
 
         Args:
             config: Configuration statique (seuils de vent, etc.)
                     Si None, utilise les valeurs par défaut.
+            logger: Logger à utiliser pour les messages de debug/warning.
+                    Si None, utilise un NullHandler (pas de logs).
         """
         self.config = config or ThermalConfig()
+        self._logger = logger or logging.getLogger(__name__)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Calcul du windchill (température ressentie)
@@ -280,7 +285,7 @@ class ThermalSolver:
                         abs(new_estimate - prev_estimate)
                         < self.config.convergence_threshold
                     ):
-                        _LOGGER.debug(
+                        self._logger.debug(
                             "Convergence atteinte en %d itérations (delta=%.4f h)",
                             iteration + 1,
                             abs(new_estimate - prev_estimate),
@@ -293,13 +298,13 @@ class ThermalSolver:
                     duree_relance = new_estimate
 
             except (ValueError, ZeroDivisionError):
-                _LOGGER.debug(
+                self._logger.debug(
                     "Erreur de calcul à l'itération %d, arrêt anticipé", iteration + 1
                 )
                 break
 
         if not converged:
-            _LOGGER.warning(
+            self._logger.warning(
                 "Max itérations (%d) atteint sans convergence (threshold=%.3f h)",
                 self.config.max_iterations,
                 self.config.convergence_threshold,
