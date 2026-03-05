@@ -13,7 +13,7 @@ from homeassistant.const import UnitOfTemperature, UnitOfTime
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.components.number import NumberEntity, NumberMode
+from homeassistant.components.number import NumberDeviceClass, NumberEntity, NumberMode
 from homeassistant.helpers.device_registry import DeviceInfo, DeviceEntryType
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -106,12 +106,13 @@ class SmartHRTSetPointNumber(SmartHRTBaseNumber):
         self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
     ) -> None:
         super().__init__(coordinator, config_entry)
-        self._attr_name = "Consigne"
+        self._attr_name = "Set Point"
         self._attr_unique_id = f"{self._device_id}_setpoint"
         self._attr_native_min_value = DEFAULT_TSP_MIN
         self._attr_native_max_value = DEFAULT_TSP_MAX
         self._attr_native_step = DEFAULT_TSP_STEP
         self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+        self._attr_device_class = NumberDeviceClass.TEMPERATURE
         self._attr_mode = NumberMode.BOX
 
     @property
@@ -169,6 +170,7 @@ class SmartHRTRPthNumber(SmartHRTBaseNumber):
         self._attr_native_max_value = DEFAULT_RPTH_MAX
         self._attr_native_step = 0.5
         self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+        self._attr_device_class = NumberDeviceClass.TEMPERATURE
         self._attr_mode = NumberMode.BOX
 
     @property
@@ -195,7 +197,7 @@ class SmartHRTRCthLWNumber(SmartHRTBaseNumber):
         self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
     ) -> None:
         super().__init__(coordinator, config_entry)
-        self._attr_name = "RCth (vent faible)"
+        self._attr_name = "RCth (Low Wind)"
         self._attr_unique_id = f"{self._device_id}_rcth_lw"
         self._attr_native_min_value = DEFAULT_RCTH_MIN
         self._attr_native_max_value = DEFAULT_RCTH_MAX
@@ -223,7 +225,7 @@ class SmartHRTRCthHWNumber(SmartHRTBaseNumber):
         self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
     ) -> None:
         super().__init__(coordinator, config_entry)
-        self._attr_name = "RCth (vent fort)"
+        self._attr_name = "RCth (High Wind)"
         self._attr_unique_id = f"{self._device_id}_rcth_hw"
         self._attr_native_min_value = DEFAULT_RCTH_MIN
         self._attr_native_max_value = DEFAULT_RCTH_MAX
@@ -251,12 +253,13 @@ class SmartHRTRPthLWNumber(SmartHRTBaseNumber):
         self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
     ) -> None:
         super().__init__(coordinator, config_entry)
-        self._attr_name = "RPth (vent faible)"
+        self._attr_name = "RPth (Low Wind)"
         self._attr_unique_id = f"{self._device_id}_rpth_lw"
         self._attr_native_min_value = DEFAULT_RPTH_MIN
         self._attr_native_max_value = DEFAULT_RPTH_MAX
         self._attr_native_step = 0.5
         self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+        self._attr_device_class = NumberDeviceClass.TEMPERATURE
         self._attr_mode = NumberMode.BOX
 
     @property
@@ -279,12 +282,13 @@ class SmartHRTRPthHWNumber(SmartHRTBaseNumber):
         self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
     ) -> None:
         super().__init__(coordinator, config_entry)
-        self._attr_name = "RPth (vent fort)"
+        self._attr_name = "RPth (High Wind)"
         self._attr_unique_id = f"{self._device_id}_rpth_hw"
         self._attr_native_min_value = DEFAULT_RPTH_MIN
         self._attr_native_max_value = DEFAULT_RPTH_MAX
         self._attr_native_step = 0.5
         self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+        self._attr_device_class = NumberDeviceClass.TEMPERATURE
         self._attr_mode = NumberMode.BOX
 
     @property
@@ -311,7 +315,7 @@ class SmartHRTRelaxationNumber(SmartHRTBaseNumber):
         self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
     ) -> None:
         super().__init__(coordinator, config_entry)
-        self._attr_name = "Facteur de relaxation"
+        self._attr_name = "Relaxation Factor"
         self._attr_unique_id = f"{self._device_id}_relaxation"
         self._attr_native_min_value = 0.0
         self._attr_native_max_value = 15.0
@@ -343,12 +347,13 @@ class SmartHRTCoolSetPointNumber(SmartHRTBaseNumber):
         self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
     ) -> None:
         super().__init__(coordinator, config_entry)
-        self._attr_name = "Consigne fraîcheur"
+        self._attr_name = "Cool Set Point"
         self._attr_unique_id = f"{self._device_id}_tsp_cool"
         self._attr_native_min_value = DEFAULT_TSP_COOL_MIN
         self._attr_native_max_value = DEFAULT_TSP_COOL_MAX
         self._attr_native_step = 0.5
         self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+        self._attr_device_class = NumberDeviceClass.TEMPERATURE
         self._attr_mode = NumberMode.BOX
 
     @property
@@ -405,6 +410,7 @@ class SmartHRTRPcuNumber(SmartHRTBaseNumber):
         self._attr_native_max_value = DEFAULT_RPCU_MAX
         self._attr_native_step = 0.5
         self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+        self._attr_device_class = NumberDeviceClass.TEMPERATURE
         self._attr_mode = NumberMode.BOX
 
     @property
@@ -427,7 +433,7 @@ class SmartHRTRCcuLWNumber(SmartHRTBaseNumber):
         self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
     ) -> None:
         super().__init__(coordinator, config_entry)
-        self._attr_name = "RCcu (vent faible)"
+        self._attr_name = "RCcu (Low Wind)"
         self._attr_unique_id = f"{self._device_id}_rccu_lw"
         self._attr_native_min_value = DEFAULT_RCCU_MIN
         self._attr_native_max_value = DEFAULT_RCCU_MAX
@@ -455,7 +461,7 @@ class SmartHRTRCcuHWNumber(SmartHRTBaseNumber):
         self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
     ) -> None:
         super().__init__(coordinator, config_entry)
-        self._attr_name = "RCcu (vent fort)"
+        self._attr_name = "RCcu (High Wind)"
         self._attr_unique_id = f"{self._device_id}_rccu_hw"
         self._attr_native_min_value = DEFAULT_RCCU_MIN
         self._attr_native_max_value = DEFAULT_RCCU_MAX
@@ -483,12 +489,13 @@ class SmartHRTRPcuLWNumber(SmartHRTBaseNumber):
         self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
     ) -> None:
         super().__init__(coordinator, config_entry)
-        self._attr_name = "RPcu (vent faible)"
+        self._attr_name = "RPcu (Low Wind)"
         self._attr_unique_id = f"{self._device_id}_rpcu_lw"
         self._attr_native_min_value = DEFAULT_RPCU_MIN
         self._attr_native_max_value = DEFAULT_RPCU_MAX
         self._attr_native_step = 0.5
         self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+        self._attr_device_class = NumberDeviceClass.TEMPERATURE
         self._attr_mode = NumberMode.BOX
 
     @property
@@ -511,12 +518,13 @@ class SmartHRTRPcuHWNumber(SmartHRTBaseNumber):
         self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
     ) -> None:
         super().__init__(coordinator, config_entry)
-        self._attr_name = "RPcu (vent fort)"
+        self._attr_name = "RPcu (High Wind)"
         self._attr_unique_id = f"{self._device_id}_rpcu_hw"
         self._attr_native_min_value = DEFAULT_RPCU_MIN
         self._attr_native_max_value = DEFAULT_RPCU_MAX
         self._attr_native_step = 0.5
         self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+        self._attr_device_class = NumberDeviceClass.TEMPERATURE
         self._attr_mode = NumberMode.BOX
 
     @property
@@ -539,7 +547,7 @@ class SmartHRTCoolRelaxationNumber(SmartHRTBaseNumber):
         self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
     ) -> None:
         super().__init__(coordinator, config_entry)
-        self._attr_name = "Facteur de relaxation (fraîcheur)"
+        self._attr_name = "Cool Relaxation Factor"
         self._attr_unique_id = f"{self._device_id}_relaxation_cool"
         self._attr_native_min_value = 0.0
         self._attr_native_max_value = 15.0

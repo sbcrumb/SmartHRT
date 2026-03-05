@@ -83,7 +83,7 @@ class SmartHRTSmartHeatingSwitch(SmartHRTBaseSwitch):
         self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
     ) -> None:
         super().__init__(coordinator, config_entry)
-        self._attr_name = "Mode chauffage intelligent"
+        self._attr_name = "Smart Heating"
         self._attr_unique_id = f"{self._device_id}_smartheating_mode"
 
     @property
@@ -116,7 +116,7 @@ class SmartHRTAdaptiveSwitch(SmartHRTBaseSwitch):
         self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
     ) -> None:
         super().__init__(coordinator, config_entry)
-        self._attr_name = "Mode adaptatif"
+        self._attr_name = "Adaptive Mode"
         self._attr_unique_id = f"{self._device_id}_adaptive_mode"
 
     @property
@@ -145,7 +145,7 @@ class SmartHRTCoolModeSwitch(SmartHRTBaseSwitch):
         self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
     ) -> None:
         super().__init__(coordinator, config_entry)
-        self._attr_name = "Mode récupération fraîcheur"
+        self._attr_name = "Cool Recovery"
         self._attr_unique_id = f"{self._device_id}_cool_mode"
 
     @property
@@ -172,7 +172,7 @@ class SmartHRTCoolAdaptiveSwitch(SmartHRTBaseSwitch):
         self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
     ) -> None:
         super().__init__(coordinator, config_entry)
-        self._attr_name = "Mode adaptatif fraîcheur"
+        self._attr_name = "Cool Adaptive Mode"
         self._attr_unique_id = f"{self._device_id}_cool_adaptive_mode"
 
     @property

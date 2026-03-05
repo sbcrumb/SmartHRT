@@ -83,7 +83,7 @@ class SmartHRTTargetHourTime(SmartHRTBaseTime):
         self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
     ) -> None:
         super().__init__(coordinator, config_entry)
-        self._attr_name = "Heure cible"
+        self._attr_name = "Wake-up Hour"
         self._attr_unique_id = f"{self._device_id}_target_hour"
 
     @property
@@ -108,7 +108,7 @@ class SmartHRTRecoveryCalcHourTime(SmartHRTBaseTime):
         self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
     ) -> None:
         super().__init__(coordinator, config_entry)
-        self._attr_name = "Heure coupure chauffage"
+        self._attr_name = "Heating Stop Hour"
         self._attr_unique_id = f"{self._device_id}_recoverycalc_hour"
 
     @property
@@ -133,7 +133,7 @@ class SmartHRTRecoveryStartTime(SmartHRTBaseTime):
         self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
     ) -> None:
         super().__init__(coordinator, config_entry)
-        self._attr_name = "Heure de relance"
+        self._attr_name = "Recovery Start"
         self._attr_unique_id = f"{self._device_id}_recovery_start_time"
 
     @property
@@ -167,7 +167,7 @@ class SmartHRTSleepHourTime(SmartHRTBaseTime):
         self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
     ) -> None:
         super().__init__(coordinator, config_entry)
-        self._attr_name = "Heure de coucher"
+        self._attr_name = "Sleep Hour"
         self._attr_unique_id = f"{self._device_id}_sleep_hour"
 
     @property
@@ -190,7 +190,7 @@ class SmartHRTCoolCalcHourTime(SmartHRTBaseTime):
         self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
     ) -> None:
         super().__init__(coordinator, config_entry)
-        self._attr_name = "Heure calcul fraîcheur"
+        self._attr_name = "Cool Calc Hour"
         self._attr_unique_id = f"{self._device_id}_coolcalc_hour"
 
     @property
@@ -213,7 +213,7 @@ class SmartHRTCoolRecoveryStartTime(SmartHRTBaseTime):
         self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
     ) -> None:
         super().__init__(coordinator, config_entry)
-        self._attr_name = "Heure démarrage clim"
+        self._attr_name = "AC Start Hour"
         self._attr_unique_id = f"{self._device_id}_cool_recovery_start_time"
 
     @property
