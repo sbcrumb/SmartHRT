@@ -53,8 +53,10 @@ from homeassistant.const import (
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
     EVENT_HOMEASSISTANT_STARTED,
+    UnitOfTemperature,
 )
 from homeassistant.util import dt as dt_util
+from homeassistant.util.unit_conversion import TemperatureConverter
 from homeassistant.exceptions import ServiceNotFound
 
 from .const import (
@@ -742,7 +744,8 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
             state = self.hass.states.get(self._interior_temp_sensor_id)
             if state and state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN):
                 try:
-                    self.data.interior_temp = float(state.state)
+                    sensor_unit = state.attributes.get("unit_of_measurement", UnitOfTemperature.CELSIUS)
+                    self.data.interior_temp = self._to_celsius(float(state.state), sensor_unit)
                 except ValueError:
                     pass
 
@@ -759,7 +762,8 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
 
         if entity_id == self._interior_temp_sensor_id:
             try:
-                self.data.interior_temp = float(new_state.state)
+                sensor_unit = new_state.attributes.get("unit_of_measurement", UnitOfTemperature.CELSIUS)
+                self.data.interior_temp = self._to_celsius(float(new_state.state), sensor_unit)
                 self._check_temperature_thresholds()
             except ValueError:
                 pass
@@ -1033,6 +1037,20 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
     # Données météo
     # ─────────────────────────────────────────────────────────────────────────
 
+    def _to_celsius(self, value: float, source_unit: str | None = None) -> float:
+        """Convert a temperature value to °C for internal storage.
+
+        HA weather entities return temperature in the system's configured unit
+        (°F on US Customary). We always store internally in °C so that sensor
+        entities declaring native_unit_of_measurement=CELSIUS get auto-converted
+        correctly by HA for display.
+        """
+        if source_unit is None:
+            source_unit = self.hass.config.units.temperature_unit
+        if source_unit == UnitOfTemperature.CELSIUS:
+            return value
+        return TemperatureConverter.convert(value, source_unit, UnitOfTemperature.CELSIUS)
+
     def _update_weather_data(self) -> None:
         """Mise à jour des données météo actuelles.
 
@@ -1056,7 +1074,7 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
             return
 
         if (temp := weather.attributes.get("temperature")) is not None:
-            self.data.exterior_temp = float(temp)
+            self.data.exterior_temp = self._to_celsius(float(temp))
 
         if (wind := weather.attributes.get("wind_speed")) is not None:
             self.data.wind_speed = float(wind) / 3.6  # km/h -> m/s
