@@ -198,6 +198,59 @@ SENSOR_DESCRIPTIONS: tuple[SmartHRTSensorDescription, ...] = (
         value_fn=lambda data: data.stop_lag_duration,
         round_digits=0,
     ),
+    # ── Cool recovery ──────────────────────────────────────────────────────────
+    SmartHRTSensorDescription(
+        key="tsp_cool_sensor",
+        translation_key="tsp_cool_sensor",
+        icon="mdi:snowflake-thermometer",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        value_fn=lambda data: data.tsp_cool,
+        round_digits=1,
+    ),
+    SmartHRTSensorDescription(
+        key="rccu_sensor",
+        translation_key="rccu_sensor",
+        icon="mdi:home-battery-outline",
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfTime.HOURS,
+        value_fn=lambda data: data.rccu,
+        extra_attrs_fn=lambda data: {
+            "rccu_lw": round(data.rccu_lw, 2),
+            "rccu_hw": round(data.rccu_hw, 2),
+            "rccu_calculated": round(data.rccu_calculated, 2),
+            "last_error": data.last_rccu_error,
+        },
+    ),
+    SmartHRTSensorDescription(
+        key="rpcu_sensor",
+        translation_key="rpcu_sensor",
+        icon="mdi:air-conditioner",
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        value_fn=lambda data: data.rpcu,
+        extra_attrs_fn=lambda data: {
+            "rpcu_lw": round(data.rpcu_lw, 2),
+            "rpcu_hw": round(data.rpcu_hw, 2),
+            "rpcu_calculated": round(data.rpcu_calculated, 2),
+            "last_error": data.last_rpcu_error,
+        },
+    ),
+    SmartHRTSensorDescription(
+        key="cool_recovery_calc_mode",
+        translation_key="cool_recovery_calc_mode",
+        icon="mdi:snowflake-alert",
+        value_fn=lambda data: "on" if data.cool_recovery_calc_mode else "off",
+        round_digits=None,
+    ),
+    SmartHRTSensorDescription(
+        key="cool_rp_calc_mode",
+        translation_key="cool_rp_calc_mode",
+        icon="mdi:air-conditioner",
+        value_fn=lambda data: "on" if data.cool_rp_calc_mode else "off",
+        round_digits=None,
+    ),
 )
 
 
@@ -502,6 +555,61 @@ class SmartHRTRecoveryCalcHourTimestampSensor(SmartHRTTimestampSensor):
         return None
 
 
+class SmartHRTCoolStateSensor(SmartHRTBaseSensor):
+    """Sensor exposant l'état courant du cycle de récupération de fraîcheur."""
+
+    STATE_ICONS = {
+        "cool_idle": "mdi:snowflake-off",
+        "cool_monitoring": "mdi:snowflake-alert",
+        "cool_recovery": "mdi:air-conditioner",
+    }
+
+    _attr_translation_key = "cool_state"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = ["cool_idle", "cool_monitoring", "cool_recovery"]
+
+    def __init__(
+        self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
+    ) -> None:
+        super().__init__(coordinator, config_entry)
+        self._attr_unique_id = f"{self._device_id}_cool_state"
+
+    @property
+    def native_value(self) -> str:
+        return self.coordinator.data.cool_current_state
+
+    @property
+    def icon(self) -> str | None:
+        state = self.coordinator.data.cool_current_state
+        return self.STATE_ICONS.get(state, "mdi:snowflake")
+
+
+class SmartHRTCoolRecoveryStartTimestampSensor(SmartHRTTimestampSensor):
+    """Sensor timestamp pour l'heure de démarrage de la clim."""
+
+    _attr_translation_key = "cool_recovery_start_timestamp"
+    _attr_icon = "mdi:air-conditioner"
+
+    def __init__(
+        self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
+    ) -> None:
+        super().__init__(coordinator, config_entry)
+        self._attr_unique_id = f"{self._device_id}_cool_recovery_start_timestamp"
+
+    @property
+    def native_value(self):
+        if self.coordinator.data.cool_recovery_start_hour:
+            return dt_util.as_local(self.coordinator.data.cool_recovery_start_hour)
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {
+            "last_rccu_error": self.coordinator.data.last_rccu_error,
+            "last_rpcu_error": self.coordinator.data.last_rpcu_error,
+        }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Setup
 # ─────────────────────────────────────────────────────────────────────────────
@@ -535,6 +643,9 @@ async def async_setup_entry(
             SmartHRTRecoveryStartTimestampSensor(coordinator, entry),
             SmartHRTTargetHourTimestampSensor(coordinator, entry),
             SmartHRTRecoveryCalcHourTimestampSensor(coordinator, entry),
+            # Cool recovery
+            SmartHRTCoolStateSensor(coordinator, entry),
+            SmartHRTCoolRecoveryStartTimestampSensor(coordinator, entry),
         ]
     )
 

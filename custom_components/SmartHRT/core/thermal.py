@@ -26,6 +26,7 @@ from .types import (
     CoefficientUpdateResult,
     PhysicsGuardResult,
     PhysicsValidation,
+    CoolThermalCoefficients,
 )
 
 
@@ -933,3 +934,552 @@ class ThermalSolver:
             outlier_clamped=outlier_clamped,
             original_calculated=original_calculated if outlier_detected else None,
         )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Cool recovery: validation et calcul (physique symétrique au chauffage)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def get_interpolated_rccu(
+        self, coefficients: CoolThermalCoefficients, wind_kmh: float
+    ) -> float:
+        """Retourne RCcu interpolé selon le vent."""
+        return self.interpolate_for_wind(
+            coefficients.rccu_lw, coefficients.rccu_hw, wind_kmh
+        )
+
+    def get_interpolated_rpcu(
+        self, coefficients: CoolThermalCoefficients, wind_kmh: float
+    ) -> float:
+        """Retourne RPcu interpolé selon le vent."""
+        return self.interpolate_for_wind(
+            coefficients.rpcu_lw, coefficients.rpcu_hw, wind_kmh
+        )
+
+    def calculate_cool_recovery_duration(
+        self,
+        state: ThermalState,
+        coefficients: CoolThermalCoefficients,
+        now: datetime,
+    ) -> RecoveryResult:
+        """Calcule l'heure de démarrage de la climatisation pour le cool recovery.
+
+        Symétrique au calcul de relance chauffage, mais pour refroidir la maison
+        jusqu'à la température cible avant l'heure de sommeil.
+
+        Formule: t = RCcu × ln( (T_int - T_ext + RPcu) / (T_sp_cool - T_ext + RPcu) )
+
+        Args:
+            state: État thermique actuel. state.tsp = tsp_cool, state.target_hour = sleep_hour
+            coefficients: Coefficients de refroidissement appris
+            now: Instant actuel
+
+        Returns:
+            RecoveryResult avec l'heure de démarrage clim et la durée estimée
+        """
+        # Utiliser les prévisions météo (avec fallback)
+        text = (
+            state.temperature_forecast_avg
+            if state.temperature_forecast_avg
+            else (state.exterior_temp or 25.0)
+        )
+        tsp_cool = state.tsp  # tsp contient tsp_cool pour le cool recovery
+
+        wind_kmh = (
+            state.wind_speed_forecast_avg_kmh
+            if state.wind_speed_forecast_avg_kmh
+            else (state.wind_speed_ms * 3.6)
+        )
+
+        rccu = self.get_interpolated_rccu(coefficients, wind_kmh)
+        rpcu = self.get_interpolated_rpcu(coefficients, wind_kmh)
+
+        # Calculer l'heure cible (sleep_hour)
+        target_dt = now.replace(
+            hour=state.target_hour.hour,
+            minute=state.target_hour.minute,
+            second=0,
+            microsecond=0,
+        )
+        if target_dt < now:
+            target_dt += timedelta(days=1)
+
+        tint = state.interior_temp if state.interior_temp is not None else 22.0
+
+        # Validation physique
+        validation = self._validate_cool_recovery_physics(
+            interior_temp=state.interior_temp,
+            exterior_temp=text if text else None,
+            target_cool_temp=tsp_cool,
+            rccu=rccu,
+            rpcu=rpcu,
+        )
+
+        self._logger.info(
+            "Cool recovery calc: tint=%.1f°C, text=%.1f°C, tsp_cool=%.1f°C, sleep=%s, "
+            "rccu=%.1f, rpcu=%.1f, validation=%s",
+            tint,
+            text,
+            tsp_cool,
+            state.target_hour,
+            rccu,
+            rpcu,
+            validation.result.name,
+        )
+
+        time_remaining = (target_dt - now).total_seconds() / 3600
+        max_duration = max(time_remaining - 1 / 6, 0)  # 10 min de marge
+
+        # Gestion des cas spéciaux
+        if validation.result == PhysicsGuardResult.ALREADY_AT_TARGET_COOL:
+            # Déjà frais mais la maison va se réchauffer passivement
+            if text > tint:
+                # Il y aura un réchauffement passif → continuer le calcul
+                self._logger.info(
+                    "Cool ADR-050: %s mais text=%.1f°C > tint → réchauffement passif attendu",
+                    validation.message,
+                    text,
+                )
+                # Ne pas retourner, continuer avec la prédiction de réchauffement
+            else:
+                # Extérieur plus frais → refroidissement passif, clim non nécessaire
+                self._logger.info(
+                    "Cool ADR-050: %s et text <= tint → pas de clim nécessaire",
+                    validation.message,
+                )
+                return RecoveryResult(
+                    recovery_start_hour=target_dt,
+                    duration_hours=0.0,
+                )
+
+        if validation.result == PhysicsGuardResult.NO_PASSIVE_WARMING:
+            # Extérieur plus frais → refroidissement naturel sans clim
+            self._logger.info(
+                "Cool ADR-050: %s - pas de clim nécessaire (target_dt=%s)",
+                validation.message,
+                target_dt.strftime("%H:%M"),
+            )
+            return RecoveryResult(
+                recovery_start_hour=target_dt,
+                duration_hours=0.0,
+            )
+
+        if validation.result == PhysicsGuardResult.MISSING_DATA:
+            self._logger.warning(
+                "Cool ADR-050: %s - utilisation de tint=22°C par défaut",
+                validation.message,
+            )
+            tint = 22.0
+
+        if validation.result in (
+            PhysicsGuardResult.TARGET_COOL_UNREACHABLE,
+            PhysicsGuardResult.INVALID_COEFFICIENT,
+        ):
+            self._logger.warning(
+                "Cool ADR-050: Calcul impossible - %s",
+                validation.message,
+            )
+            return RecoveryResult(
+                recovery_start_hour=target_dt,
+                duration_hours=0.0,
+            )
+
+        # Cas normal ou ALREADY_AT_TARGET_COOL avec réchauffement passif attendu
+        if tint <= tsp_cool and text > tint:
+            # Maison déjà fraîche mais va se réchauffer → prédire le réchauffement
+            cool_duration, iterations = self._calculate_with_warming_prediction(
+                tint=tint,
+                text=text,
+                tsp_cool=tsp_cool,
+                rccu=rccu,
+                rpcu=rpcu,
+                time_remaining=time_remaining,
+                max_duration=max_duration,
+            )
+        else:
+            # Cas normal: tint > tsp_cool, calcul direct de la durée clim
+            denominator = tsp_cool - text + rpcu
+            numerator_val = tint - text + rpcu
+            if denominator <= 0.001 or numerator_val <= 0.001:
+                return RecoveryResult(recovery_start_hour=target_dt, duration_hours=0.0)
+            ratio = numerator_val / denominator
+            ratio = max(ratio, 1.001)  # Doit être > 1 pour log > 0
+            cool_duration = min(max(rccu * math.log(ratio), 0), max_duration)
+
+            cool_duration, iterations = self._calculate_cool_with_convergence(
+                tint=tint,
+                text=text,
+                tsp_cool=tsp_cool,
+                rccu=rccu,
+                rpcu=rpcu,
+                time_remaining=time_remaining,
+                max_duration=max_duration,
+                initial_estimate=cool_duration,
+            )
+
+        recovery_start_hour = target_dt - timedelta(seconds=int(cool_duration * 3600))
+
+        self._logger.info(
+            "Cool recovery: durée=%.2fh, start=%s, iterations=%d "
+            "(tint=%.1f, text=%.1f, tsp_cool=%.1f)",
+            cool_duration,
+            recovery_start_hour.strftime("%H:%M"),
+            iterations,
+            tint,
+            text,
+            tsp_cool,
+        )
+
+        return RecoveryResult(
+            recovery_start_hour=recovery_start_hour,
+            duration_hours=cool_duration,
+        )
+
+    def _validate_cool_recovery_physics(
+        self,
+        interior_temp: float | None,
+        exterior_temp: float | None,
+        target_cool_temp: float,
+        rccu: float,
+        rpcu: float,
+    ) -> PhysicsValidation:
+        """Valide les contraintes physiques pour le cool recovery.
+
+        Args:
+            interior_temp: Température intérieure (°C) ou None
+            exterior_temp: Température extérieure (°C) ou None
+            target_cool_temp: Température cible de fraîcheur (°C)
+            rccu: Constante thermique de réchauffement passif
+            rpcu: Constante de puissance de la climatisation
+
+        Returns:
+            PhysicsValidation avec le résultat et un message.
+        """
+        if interior_temp is None or exterior_temp is None:
+            return PhysicsValidation(
+                PhysicsGuardResult.MISSING_DATA,
+                "Température intérieure ou extérieure non disponible",
+            )
+
+        if rccu <= 0 or rpcu <= 0:
+            return PhysicsValidation(
+                PhysicsGuardResult.INVALID_COEFFICIENT,
+                f"rccu ({rccu}) et rpcu ({rpcu}) doivent être positifs",
+            )
+
+        if interior_temp <= target_cool_temp:
+            return PhysicsValidation(
+                PhysicsGuardResult.ALREADY_AT_TARGET_COOL,
+                f"Temp intérieure ({interior_temp:.1f}°C) <= cible cool ({target_cool_temp:.1f}°C)",
+                suggested_value=0.0,
+            )
+
+        if exterior_temp <= interior_temp:
+            return PhysicsValidation(
+                PhysicsGuardResult.NO_PASSIVE_WARMING,
+                f"Extérieur ({exterior_temp:.1f}°C) <= intérieur ({interior_temp:.1f}°C) "
+                "— refroidissement naturel suffisant",
+                suggested_value=0.0,
+            )
+
+        # Vérifier que la clim peut atteindre la cible: RPcu > T_ext - T_sp_cool
+        if rpcu <= (exterior_temp - target_cool_temp):
+            return PhysicsValidation(
+                PhysicsGuardResult.TARGET_COOL_UNREACHABLE,
+                f"RPcu ({rpcu:.1f}) insuffisant pour atteindre {target_cool_temp:.1f}°C "
+                f"avec T_ext={exterior_temp:.1f}°C (besoin: RPcu > {exterior_temp - target_cool_temp:.1f})",
+            )
+
+        return PhysicsValidation(PhysicsGuardResult.VALID)
+
+    def _calculate_cool_with_convergence(
+        self,
+        tint: float,
+        text: float,
+        tsp_cool: float,
+        rccu: float,
+        rpcu: float,
+        time_remaining: float,
+        max_duration: float,
+        initial_estimate: float,
+    ) -> tuple[float, int]:
+        """Calcul itératif de la durée clim avec convergence (cool recovery).
+
+        Prédit la température intérieure au moment du démarrage clim après
+        réchauffement passif, puis calcule la durée clim nécessaire.
+
+        Args:
+            tint: Température intérieure actuelle (> tsp_cool)
+            text: Température extérieure prévue (> tint en été)
+            tsp_cool: Température cible de fraîcheur
+            rccu: Coefficient de réchauffement passif
+            rpcu: Coefficient de puissance clim
+            time_remaining: Temps restant avant sleep_hour (heures)
+            max_duration: Durée maximale autorisée (heures)
+            initial_estimate: Estimation initiale
+
+        Returns:
+            Tuple (durée clim calculée, nombre d'itérations)
+        """
+        cool_duration = initial_estimate
+        prev_estimate = float("inf")
+        converged = False
+        iterations = 0
+
+        for iteration in range(self.config.max_iterations):
+            iterations = iteration + 1
+
+            # Temps de réchauffement passif avant le démarrage clim
+            warming_time = time_remaining - cool_duration
+            exponent = warming_time / rccu
+            exponent = max(-100, min(100, exponent))
+
+            # Température intérieure prédite au moment du démarrage clim
+            # T(t) = T_ext + (T_int - T_ext) * exp(-t/RCcu)
+            # Si T_ext > T_int (été), la maison se réchauffe vers T_ext
+            exp_factor = math.exp(exponent)
+            tint_at_start = text + (tint - text) / exp_factor
+
+            # Dénominateur de la formule cool recovery
+            denominator = tsp_cool - text + rpcu
+            if abs(denominator) < 0.001:
+                self._logger.debug(
+                    "Cool ADR-050: Dénominateur proche de zéro (%f), arrêt itération %d",
+                    denominator,
+                    iteration + 1,
+                )
+                break
+
+            numerator_val = tint_at_start - text + rpcu
+            if numerator_val <= 0.001 or denominator <= 0.001:
+                self._logger.debug(
+                    "Cool ADR-050: Ratio invalide (num=%.4f, denom=%.4f), arrêt",
+                    numerator_val,
+                    denominator,
+                )
+                break
+
+            ratio = numerator_val / denominator
+            if ratio <= 1.0:
+                # Temperature déjà à la cible au démarrage clim
+                cool_duration = 0.0
+                break
+
+            # Moyenne pondérée pour éviter les oscillations
+            new_estimate = min(
+                (cool_duration + 2 * max(rccu * math.log(ratio), 0)) / 3,
+                max_duration,
+            )
+
+            if abs(new_estimate - prev_estimate) < self.config.convergence_threshold:
+                self._logger.debug(
+                    "Cool convergence en %d itérations (delta=%.4f h)",
+                    iteration + 1,
+                    abs(new_estimate - prev_estimate),
+                )
+                converged = True
+                cool_duration = new_estimate
+                break
+
+            prev_estimate = cool_duration
+            cool_duration = new_estimate
+
+        if not converged and iterations >= self.config.max_iterations:
+            self._logger.warning(
+                "Cool: Max itérations (%d) atteint sans convergence",
+                self.config.max_iterations,
+            )
+
+        return cool_duration, iterations
+
+    def _calculate_with_warming_prediction(
+        self,
+        tint: float,
+        text: float,
+        tsp_cool: float,
+        rccu: float,
+        rpcu: float,
+        time_remaining: float,
+        max_duration: float,
+    ) -> tuple[float, int]:
+        """Calcul avec prédiction de réchauffement (tint <= tsp_cool actuellement).
+
+        Quand la maison est déjà fraîche mais va se réchauffer passivement
+        (T_ext > T_int), on prédit quand la clim devra démarrer.
+
+        Args:
+            tint: Température intérieure actuelle (<= tsp_cool)
+            text: Température extérieure (> tint, réchauffe la maison)
+            tsp_cool: Température cible de fraîcheur
+            rccu: Coefficient de réchauffement passif
+            rpcu: Coefficient de puissance clim
+            time_remaining: Temps restant avant sleep_hour (heures)
+            max_duration: Durée maximale autorisée (heures)
+
+        Returns:
+            Tuple (durée clim calculée, nombre d'itérations)
+        """
+        # Estimation initiale pessimiste: durée pour refroidir depuis text jusqu'à tsp_cool
+        ratio_init = (text - text + rpcu) / (tsp_cool - text + rpcu) if rpcu > 0 else 1.0
+        ratio_init = max(ratio_init, 1.001)
+        cool_duration = min(max(rccu * math.log(ratio_init), 0.1), max_duration)
+
+        prev_estimate = float("inf")
+        iterations = 0
+        tint_at_start = tint
+
+        for iteration in range(self.config.max_iterations):
+            iterations = iteration + 1
+
+            # Temps de réchauffement passif avant le démarrage clim
+            warming_time = time_remaining - cool_duration
+            if warming_time <= 0:
+                cool_duration = time_remaining
+                break
+
+            # Température prédite après réchauffement passif
+            exponent = -warming_time / rccu
+            exponent = max(-100, min(100, exponent))
+            tint_at_start = text + (tint - text) * math.exp(exponent)
+
+            self._logger.debug(
+                "Warming prediction iter %d: warming_time=%.2fh, tint_at_start=%.1f°C",
+                iterations,
+                warming_time,
+                tint_at_start,
+            )
+
+            # Si la maison ne se réchauffe pas assez, pas besoin de clim
+            if tint_at_start <= tsp_cool:
+                cool_duration = 0.0
+                break
+
+            # Calculer la durée clim depuis tint_at_start jusqu'à tsp_cool
+            denominator = tsp_cool - text + rpcu
+            if abs(denominator) < 0.001:
+                break
+
+            numerator_val = tint_at_start - text + rpcu
+            if numerator_val <= denominator:
+                cool_duration = 0.0
+                break
+
+            ratio = numerator_val / denominator
+            if ratio <= 1.0:
+                cool_duration = 0.0
+                break
+
+            new_estimate = min(max(rccu * math.log(ratio), 0), max_duration)
+            new_estimate = (cool_duration + 2 * new_estimate) / 3
+
+            if abs(new_estimate - prev_estimate) < self.config.convergence_threshold:
+                self._logger.debug(
+                    "Warming prediction convergence en %d itérations",
+                    iterations,
+                )
+                cool_duration = new_estimate
+                break
+
+            prev_estimate = cool_duration
+            cool_duration = new_estimate
+
+        self._logger.info(
+            "Warming prediction: durée clim=%.2fh après %d itérations (tint=%.1f → %.1f°C)",
+            cool_duration,
+            iterations,
+            tint,
+            tint_at_start,
+        )
+
+        return cool_duration, iterations
+
+    def calculate_rccu_at_recovery(
+        self,
+        temp_cool_calc: float,
+        temp_cool_start: float,
+        text_cool_calc: float,
+        text_cool_start: float,
+        time_cool_calc: datetime,
+        time_cool_start: datetime,
+    ) -> float | None:
+        """Calcule RCcu à partir de la phase de réchauffement passif.
+
+        Formule identique à calculate_rcth_at_recovery (physique symétrique):
+        RCcu = Δt / ln( (avg_T_ext - T_early) / (avg_T_ext - T_late) )
+
+        En été: avg_T_ext > T_early, avg_T_ext > T_late, T_late > T_early (réchauffement)
+        → ratio > 1, ln > 0 ✓
+
+        Args:
+            temp_cool_calc: Température intérieure au coolcalc_hour (début réchauffement)
+            temp_cool_start: Température intérieure au démarrage clim (fin réchauffement)
+            text_cool_calc: Température extérieure au coolcalc_hour
+            text_cool_start: Température extérieure au démarrage clim
+            time_cool_calc: Timestamp du coolcalc_hour
+            time_cool_start: Timestamp du démarrage clim
+
+        Returns:
+            RCcu calculé, ou None si calcul impossible
+        """
+        dt_hours = (
+            time_cool_start.timestamp() - time_cool_calc.timestamp()
+        ) / 3600
+        avg_text = (text_cool_calc + text_cool_start) / 2
+
+        try:
+            rccu = min(
+                self.config.coef_max,
+                dt_hours
+                / math.log(
+                    (avg_text - temp_cool_calc) / (avg_text - temp_cool_start)
+                ),
+            )
+            return rccu
+        except (ValueError, ZeroDivisionError):
+            return None
+
+    def calculate_rpcu_at_recovery(
+        self,
+        temp_cool_start: float,
+        temp_cool_end: float,
+        text_cool_start: float,
+        text_cool_end: float,
+        time_cool_start: datetime,
+        time_cool_end: datetime,
+        rccu_interpolated: float,
+    ) -> float | None:
+        """Calcule RPcu à partir de la phase de refroidissement actif (clim).
+
+        Formule différente de RPth (dérivée de l'équation différentielle de cooling):
+        exp_term = exp(Δt / RCcu)
+        RPcu = avg_T_ext + (T_end × exp_term - T_start) / (1 - exp_term)
+
+        Args:
+            temp_cool_start: Température intérieure au démarrage clim
+            temp_cool_end: Température intérieure à l'heure de sommeil
+            text_cool_start: Température extérieure au démarrage clim
+            text_cool_end: Température extérieure à l'heure de sommeil
+            time_cool_start: Timestamp du démarrage clim
+            time_cool_end: Timestamp de l'heure de sommeil
+            rccu_interpolated: RCcu interpolé selon le vent
+
+        Returns:
+            RPcu calculé, ou None si calcul impossible
+        """
+        dt_hours = (
+            time_cool_end.timestamp() - time_cool_start.timestamp()
+        ) / 3600
+        avg_text = (text_cool_start + text_cool_end) / 2
+
+        try:
+            exp_term = math.exp(dt_hours / rccu_interpolated)
+            # RPcu = avg_T_ext + (T_end * exp_term - T_start) / (1 - exp_term)
+            rpcu = min(
+                self.config.coef_max,
+                max(
+                    self.config.coef_min,
+                    avg_text + (temp_cool_end * exp_term - temp_cool_start) / (1 - exp_term),
+                ),
+            )
+            return rpcu
+        except (ValueError, ZeroDivisionError):
+            return None

@@ -41,6 +41,8 @@ async def async_setup_entry(
     entities = [
         SmartHRTSmartHeatingSwitch(coordinator, entry),
         SmartHRTAdaptiveSwitch(coordinator, entry),
+        SmartHRTCoolModeSwitch(coordinator, entry),
+        SmartHRTCoolAdaptiveSwitch(coordinator, entry),
     ]
     async_add_entities(entities, True)
 
@@ -134,3 +136,57 @@ class SmartHRTAdaptiveSwitch(SmartHRTBaseSwitch):
         """Désactiver le mode adaptatif"""
         _LOGGER.info("Adaptive mode disabled")
         self.coordinator.set_adaptive_mode(False)
+
+
+class SmartHRTCoolModeSwitch(SmartHRTBaseSwitch):
+    """Switch pour activer/désactiver le mode récupération de fraîcheur."""
+
+    def __init__(
+        self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
+    ) -> None:
+        super().__init__(coordinator, config_entry)
+        self._attr_name = "Mode récupération fraîcheur"
+        self._attr_unique_id = f"{self._device_id}_cool_mode"
+
+    @property
+    def is_on(self) -> bool:
+        return self.coordinator.data.cool_mode_enabled
+
+    @property
+    def icon(self) -> str | None:
+        return "mdi:snowflake" if self.is_on else "mdi:snowflake-off"
+
+    async def async_turn_on(self, **kwargs) -> None:
+        _LOGGER.info("Cool recovery mode enabled")
+        self.coordinator.set_cool_mode_enabled(True)
+
+    async def async_turn_off(self, **kwargs) -> None:
+        _LOGGER.info("Cool recovery mode disabled")
+        self.coordinator.set_cool_mode_enabled(False)
+
+
+class SmartHRTCoolAdaptiveSwitch(SmartHRTBaseSwitch):
+    """Switch pour activer/désactiver le mode adaptatif des coefficients cool."""
+
+    def __init__(
+        self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
+    ) -> None:
+        super().__init__(coordinator, config_entry)
+        self._attr_name = "Mode adaptatif fraîcheur"
+        self._attr_unique_id = f"{self._device_id}_cool_adaptive_mode"
+
+    @property
+    def is_on(self) -> bool:
+        return self.coordinator.data.smartcooling_mode
+
+    @property
+    def icon(self) -> str | None:
+        return "mdi:brain" if self.is_on else "mdi:brain-off-outline"
+
+    async def async_turn_on(self, **kwargs) -> None:
+        _LOGGER.info("Cool adaptive mode enabled")
+        self.coordinator.set_smartcooling_mode(True)
+
+    async def async_turn_off(self, **kwargs) -> None:
+        _LOGGER.info("Cool adaptive mode disabled")
+        self.coordinator.set_smartcooling_mode(False)

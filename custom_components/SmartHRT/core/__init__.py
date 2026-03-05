@@ -15,6 +15,8 @@ from .types import (
     ThermalConfig,
     Action,
     StateTransitionResult,
+    CoolSmartHRTState,
+    CoolThermalCoefficients,
 )
 from .thermal import ThermalSolver
 from .state_machine import (
@@ -24,6 +26,8 @@ from .state_machine import (
     TRANSITION_ACTIONS,
     STATE_FLAGS,
     get_state_flags,
+    COOL_VALID_TRANSITIONS,
+    COOL_TRANSITION_ACTIONS,
 )
 
 __all__ = [
@@ -39,4 +43,9 @@ __all__ = [
     "TRANSITION_ACTIONS",
     "STATE_FLAGS",
     "get_state_flags",
+    # Cool recovery
+    "CoolSmartHRTState",
+    "CoolThermalCoefficients",
+    "COOL_VALID_TRANSITIONS",
+    "COOL_TRANSITION_ACTIONS",
 ]

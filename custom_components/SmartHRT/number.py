@@ -29,6 +29,12 @@ from .const import (
     DEFAULT_RCTH_MAX,
     DEFAULT_RPTH_MIN,
     DEFAULT_RPTH_MAX,
+    DEFAULT_TSP_COOL_MIN,
+    DEFAULT_TSP_COOL_MAX,
+    DEFAULT_RCCU_MIN,
+    DEFAULT_RCCU_MAX,
+    DEFAULT_RPCU_MIN,
+    DEFAULT_RPCU_MAX,
 )
 from .coordinator import SmartHRTCoordinator
 
@@ -55,6 +61,15 @@ async def async_setup_entry(
         SmartHRTRPthLWNumber(coordinator, entry),
         SmartHRTRPthHWNumber(coordinator, entry),
         SmartHRTRelaxationNumber(coordinator, entry),
+        # Cool recovery
+        SmartHRTCoolSetPointNumber(coordinator, entry),
+        SmartHRTRCcuNumber(coordinator, entry),
+        SmartHRTRPcuNumber(coordinator, entry),
+        SmartHRTRCcuLWNumber(coordinator, entry),
+        SmartHRTRCcuHWNumber(coordinator, entry),
+        SmartHRTRPcuLWNumber(coordinator, entry),
+        SmartHRTRPcuHWNumber(coordinator, entry),
+        SmartHRTCoolRelaxationNumber(coordinator, entry),
     ]
     async_add_entities(entities, True)
 
@@ -314,3 +329,231 @@ class SmartHRTRelaxationNumber(SmartHRTBaseNumber):
     async def async_set_native_value(self, value: float) -> None:
         _LOGGER.info("Relaxation factor changed to: %s", value)
         self.coordinator.set_relaxation_factor(value)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cool Recovery Number Entities
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class SmartHRTCoolSetPointNumber(SmartHRTBaseNumber):
+    """Entité number pour la consigne de température de fraîcheur."""
+
+    def __init__(
+        self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
+    ) -> None:
+        super().__init__(coordinator, config_entry)
+        self._attr_name = "Consigne fraîcheur"
+        self._attr_unique_id = f"{self._device_id}_tsp_cool"
+        self._attr_native_min_value = DEFAULT_TSP_COOL_MIN
+        self._attr_native_max_value = DEFAULT_TSP_COOL_MAX
+        self._attr_native_step = 0.5
+        self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+        self._attr_mode = NumberMode.BOX
+
+    @property
+    def native_value(self) -> float:
+        return self.coordinator.data.tsp_cool
+
+    @property
+    def icon(self) -> str | None:
+        return "mdi:snowflake-thermometer"
+
+    async def async_set_native_value(self, value: float) -> None:
+        _LOGGER.info("Cool set point changed to: %s", value)
+        self.coordinator.set_tsp_cool(value)
+
+
+class SmartHRTRCcuNumber(SmartHRTBaseNumber):
+    """Entité number pour RCcu (constante de temps de réchauffement passif)."""
+
+    def __init__(
+        self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
+    ) -> None:
+        super().__init__(coordinator, config_entry)
+        self._attr_name = "RCcu"
+        self._attr_unique_id = f"{self._device_id}_rccu"
+        self._attr_native_min_value = DEFAULT_RCCU_MIN
+        self._attr_native_max_value = DEFAULT_RCCU_MAX
+        self._attr_native_step = 0.5
+        self._attr_native_unit_of_measurement = UnitOfTime.HOURS
+        self._attr_mode = NumberMode.BOX
+
+    @property
+    def native_value(self) -> float:
+        return round(self.coordinator.data.rccu, 2)
+
+    @property
+    def icon(self) -> str | None:
+        return "mdi:home-battery-outline"
+
+    async def async_set_native_value(self, value: float) -> None:
+        _LOGGER.info("RCcu changed to: %s", value)
+        self.coordinator.set_rccu(value)
+
+
+class SmartHRTRPcuNumber(SmartHRTBaseNumber):
+    """Entité number pour RPcu (puissance de refroidissement clim)."""
+
+    def __init__(
+        self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
+    ) -> None:
+        super().__init__(coordinator, config_entry)
+        self._attr_name = "RPcu"
+        self._attr_unique_id = f"{self._device_id}_rpcu"
+        self._attr_native_min_value = DEFAULT_RPCU_MIN
+        self._attr_native_max_value = DEFAULT_RPCU_MAX
+        self._attr_native_step = 0.5
+        self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+        self._attr_mode = NumberMode.BOX
+
+    @property
+    def native_value(self) -> float:
+        return round(self.coordinator.data.rpcu, 2)
+
+    @property
+    def icon(self) -> str | None:
+        return "mdi:air-conditioner"
+
+    async def async_set_native_value(self, value: float) -> None:
+        _LOGGER.info("RPcu changed to: %s", value)
+        self.coordinator.set_rpcu(value)
+
+
+class SmartHRTRCcuLWNumber(SmartHRTBaseNumber):
+    """Entité number pour RCcu low wind."""
+
+    def __init__(
+        self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
+    ) -> None:
+        super().__init__(coordinator, config_entry)
+        self._attr_name = "RCcu (vent faible)"
+        self._attr_unique_id = f"{self._device_id}_rccu_lw"
+        self._attr_native_min_value = DEFAULT_RCCU_MIN
+        self._attr_native_max_value = DEFAULT_RCCU_MAX
+        self._attr_native_step = 0.5
+        self._attr_native_unit_of_measurement = UnitOfTime.HOURS
+        self._attr_mode = NumberMode.BOX
+
+    @property
+    def native_value(self) -> float:
+        return round(self.coordinator.data.rccu_lw, 2)
+
+    @property
+    def icon(self) -> str | None:
+        return "mdi:home-battery-outline"
+
+    async def async_set_native_value(self, value: float) -> None:
+        _LOGGER.info("RCcu LW changed to: %s", value)
+        self.coordinator.set_rccu_lw(value)
+
+
+class SmartHRTRCcuHWNumber(SmartHRTBaseNumber):
+    """Entité number pour RCcu high wind."""
+
+    def __init__(
+        self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
+    ) -> None:
+        super().__init__(coordinator, config_entry)
+        self._attr_name = "RCcu (vent fort)"
+        self._attr_unique_id = f"{self._device_id}_rccu_hw"
+        self._attr_native_min_value = DEFAULT_RCCU_MIN
+        self._attr_native_max_value = DEFAULT_RCCU_MAX
+        self._attr_native_step = 0.5
+        self._attr_native_unit_of_measurement = UnitOfTime.HOURS
+        self._attr_mode = NumberMode.BOX
+
+    @property
+    def native_value(self) -> float:
+        return round(self.coordinator.data.rccu_hw, 2)
+
+    @property
+    def icon(self) -> str | None:
+        return "mdi:home-battery-outline"
+
+    async def async_set_native_value(self, value: float) -> None:
+        _LOGGER.info("RCcu HW changed to: %s", value)
+        self.coordinator.set_rccu_hw(value)
+
+
+class SmartHRTRPcuLWNumber(SmartHRTBaseNumber):
+    """Entité number pour RPcu low wind."""
+
+    def __init__(
+        self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
+    ) -> None:
+        super().__init__(coordinator, config_entry)
+        self._attr_name = "RPcu (vent faible)"
+        self._attr_unique_id = f"{self._device_id}_rpcu_lw"
+        self._attr_native_min_value = DEFAULT_RPCU_MIN
+        self._attr_native_max_value = DEFAULT_RPCU_MAX
+        self._attr_native_step = 0.5
+        self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+        self._attr_mode = NumberMode.BOX
+
+    @property
+    def native_value(self) -> float:
+        return round(self.coordinator.data.rpcu_lw, 2)
+
+    @property
+    def icon(self) -> str | None:
+        return "mdi:air-conditioner"
+
+    async def async_set_native_value(self, value: float) -> None:
+        _LOGGER.info("RPcu LW changed to: %s", value)
+        self.coordinator.set_rpcu_lw(value)
+
+
+class SmartHRTRPcuHWNumber(SmartHRTBaseNumber):
+    """Entité number pour RPcu high wind."""
+
+    def __init__(
+        self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
+    ) -> None:
+        super().__init__(coordinator, config_entry)
+        self._attr_name = "RPcu (vent fort)"
+        self._attr_unique_id = f"{self._device_id}_rpcu_hw"
+        self._attr_native_min_value = DEFAULT_RPCU_MIN
+        self._attr_native_max_value = DEFAULT_RPCU_MAX
+        self._attr_native_step = 0.5
+        self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+        self._attr_mode = NumberMode.BOX
+
+    @property
+    def native_value(self) -> float:
+        return round(self.coordinator.data.rpcu_hw, 2)
+
+    @property
+    def icon(self) -> str | None:
+        return "mdi:air-conditioner"
+
+    async def async_set_native_value(self, value: float) -> None:
+        _LOGGER.info("RPcu HW changed to: %s", value)
+        self.coordinator.set_rpcu_hw(value)
+
+
+class SmartHRTCoolRelaxationNumber(SmartHRTBaseNumber):
+    """Entité number pour le facteur de relaxation des coefficients cool."""
+
+    def __init__(
+        self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
+    ) -> None:
+        super().__init__(coordinator, config_entry)
+        self._attr_name = "Facteur de relaxation (fraîcheur)"
+        self._attr_unique_id = f"{self._device_id}_relaxation_cool"
+        self._attr_native_min_value = 0.0
+        self._attr_native_max_value = 15.0
+        self._attr_native_step = 0.05
+        self._attr_mode = NumberMode.BOX
+
+    @property
+    def native_value(self) -> float:
+        return self.coordinator.data.relaxation_factor_cool
+
+    @property
+    def icon(self) -> str | None:
+        return "mdi:brain"
+
+    async def async_set_native_value(self, value: float) -> None:
+        _LOGGER.info("Cool relaxation factor changed to: %s", value)
+        self.coordinator.set_relaxation_factor_cool(value)

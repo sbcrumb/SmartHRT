@@ -119,14 +119,69 @@ trigger_calculation:
   name: Déclencher Calcul
   description: >
     Déclenche immédiatement un nouveau calcul de l'heure de relance.
-    Utile après avoir modifié des paramètres pour voir l'effet immédiatement 
+    Utile après avoir modifié des paramètres pour voir l'effet immédiatement
     sans attendre le prochain calcul automatique.
   fields:
     entry_id:
       name: Entry ID
       description: >
-        L'ID de l'instance SmartHRT (multi-instance). Si vous avez plusieurs instances, 
+        L'ID de l'instance SmartHRT (multi-instance). Si vous avez plusieurs instances,
         spécifiez l'entry_id pour cibler une instance spécifique.
+      required: false
+      advanced: true
+      example: "abc123def456"
+      selector:
+        text:
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SERVICES RÉCUPÉRATION DE FRAÎCHEUR (COOL RECOVERY)
+# ═══════════════════════════════════════════════════════════════════════════
+
+start_cool_recovery:
+  name: Démarrer Récupération Fraîcheur
+  description: >
+    Démarre manuellement la phase de refroidissement (clim on).
+    Enregistre le snapshot de début et calcule RCcu.
+    Transition: COOL_MONITORING → COOL_RECOVERY.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: >
+        L'ID de l'instance SmartHRT (multi-instance).
+      required: false
+      advanced: true
+      example: "abc123def456"
+      selector:
+        text:
+
+end_cool_recovery:
+  name: Terminer Récupération Fraîcheur
+  description: >
+    Termine manuellement la phase de refroidissement (clim off).
+    Calcule RPcu et retourne en mode COOL_IDLE.
+    Transition: COOL_RECOVERY → COOL_IDLE.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: >
+        L'ID de l'instance SmartHRT (multi-instance).
+      required: false
+      advanced: true
+      example: "abc123def456"
+      selector:
+        text:
+
+reset_cool_learning:
+  name: Réinitialiser Apprentissage Fraîcheur
+  description: >
+    Réinitialise tous les coefficients thermiques cool appris (RCcu, RPcu et leurs
+    variantes vent) aux valeurs par défaut (50). Utilisez ce service si les
+    valeurs apprises sont devenues inexactes.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: >
+        L'ID de l'instance SmartHRT (multi-instance).
       required: false
       advanced: true
       example: "abc123def456"

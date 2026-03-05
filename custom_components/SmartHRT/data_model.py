@@ -36,8 +36,11 @@ from .const import (
     DEFAULT_RCTH_MAX,
     DEFAULT_RELAXATION_FACTOR,
     DEFAULT_TSP,
+    DEFAULT_TSP_COOL,
+    DEFAULT_RCCU,
+    DEFAULT_RPCU,
 )
-from .core import SmartHRTState
+from .core import SmartHRTState, CoolSmartHRTState
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -76,6 +79,23 @@ def _state_validator(v: Any) -> SmartHRTState:
 
 def _state_serializer(state: SmartHRTState) -> str:
     """Sérialise un SmartHRTState en string."""
+    return state.value
+
+
+def _cool_state_validator(v: Any) -> CoolSmartHRTState:
+    """Convertit une string en CoolSmartHRTState."""
+    if isinstance(v, CoolSmartHRTState):
+        return v
+    if isinstance(v, str):
+        try:
+            return CoolSmartHRTState(v)
+        except ValueError:
+            return CoolSmartHRTState.COOL_IDLE
+    return CoolSmartHRTState.COOL_IDLE
+
+
+def _cool_state_serializer(state: CoolSmartHRTState) -> str:
+    """Sérialise un CoolSmartHRTState en string."""
     return state.value
 
 
@@ -118,6 +138,12 @@ SmartHRTStateField = Annotated[
     SmartHRTState,
     BeforeValidator(_state_validator),
     PlainSerializer(_state_serializer, return_type=str),
+]
+
+CoolSmartHRTStateField = Annotated[
+    CoolSmartHRTState,
+    BeforeValidator(_cool_state_validator),
+    PlainSerializer(_cool_state_serializer, return_type=str),
 ]
 
 TimeField = Annotated[
@@ -224,6 +250,52 @@ class SmartHRTData(BaseModel):
     last_rpth_error: float = Field(default=0.0)
 
     # ─────────────────────────────────────────────────────────────────────────
+    # Cool recovery configuration
+    # ─────────────────────────────────────────────────────────────────────────
+    cool_mode_enabled: bool = Field(default=False)
+    tsp_cool: float = Field(default=DEFAULT_TSP_COOL, ge=14.0, le=26.0)
+    sleep_hour: TimeField = Field(default_factory=lambda: dt_time(22, 0, 0))
+    coolcalc_hour: TimeField = Field(default_factory=lambda: dt_time(18, 0, 0))
+    smartcooling_mode: bool = Field(default=True)  # Enable/disable cool adaptive mode
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Cool thermal coefficients (RCcu/RPcu)
+    # ─────────────────────────────────────────────────────────────────────────
+    rccu: float = Field(default=DEFAULT_RCCU, ge=0, le=19999.0)
+    rpcu: float = Field(default=DEFAULT_RPCU, ge=0, le=19999.0)
+    rccu_lw: float = Field(default=DEFAULT_RCCU, ge=0)
+    rccu_hw: float = Field(default=DEFAULT_RCCU, ge=0)
+    rpcu_lw: float = Field(default=DEFAULT_RPCU, ge=0)
+    rpcu_hw: float = Field(default=DEFAULT_RPCU, ge=0)
+    relaxation_factor_cool: float = Field(default=2.0, ge=0.1, le=10.0)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Cool state machine
+    # ─────────────────────────────────────────────────────────────────────────
+    cool_current_state: CoolSmartHRTStateField = Field(default=CoolSmartHRTState.COOL_IDLE)
+
+    # Cool snapshots de référence
+    time_cool_calc: DateTimeField = Field(default=None)
+    time_cool_start: DateTimeField = Field(default=None)
+    time_cool_end: DateTimeField = Field(default=None)
+    temp_cool_calc: float = Field(default=22.0)
+    temp_cool_start: float = Field(default=22.0)
+    temp_cool_end: float = Field(default=22.0)
+    text_cool_calc: float = Field(default=25.0)
+    text_cool_start: float = Field(default=25.0)
+    text_cool_end: float = Field(default=25.0)
+
+    # Cool recovery schedule
+    cool_recovery_start_hour: DateTimeField = Field(default=None)
+    cool_recovery_update_hour: DateTimeField = Field(default=None)
+
+    # Cool diagnostics
+    rccu_calculated: float = Field(default=0.0)
+    rpcu_calculated: float = Field(default=0.0)
+    last_rccu_error: float = Field(default=0.0)
+    last_rpcu_error: float = Field(default=0.0)
+
+    # ─────────────────────────────────────────────────────────────────────────
     # ADR-040: Flags calculés depuis current_state (propriétés en lecture seule)
     # ─────────────────────────────────────────────────────────────────────────
     @property
@@ -241,6 +313,16 @@ class SmartHRTData(BaseModel):
         """True si en état DETECTING_LAG (surveillance de baisse température)."""
         return self.current_state == SmartHRTState.DETECTING_LAG
 
+    @property
+    def cool_recovery_calc_mode(self) -> bool:
+        """True si en état COOL_MONITORING (calcul heure démarrage clim actif)."""
+        return self.cool_current_state == CoolSmartHRTState.COOL_MONITORING
+
+    @property
+    def cool_rp_calc_mode(self) -> bool:
+        """True si en état COOL_RECOVERY (clim en marche, mesure RPcu)."""
+        return self.cool_current_state == CoolSmartHRTState.COOL_RECOVERY
+
     # ─────────────────────────────────────────────────────────────────────────
     # Validation et normalisation
     # ─────────────────────────────────────────────────────────────────────────
@@ -252,6 +334,16 @@ class SmartHRTData(BaseModel):
             return DEFAULT_RCTH_MIN
         if v > DEFAULT_RCTH_MAX:
             return DEFAULT_RCTH_MAX
+        return v
+
+    @field_validator("rccu", "rpcu", "rccu_lw", "rccu_hw", "rpcu_lw", "rpcu_hw")
+    @classmethod
+    def clamp_cool_coefficients(cls, v: float) -> float:
+        """S'assure que les coefficients cool sont dans les limites."""
+        if v < 0.0:
+            return 0.0
+        if v > 19999.0:
+            return 19999.0
         return v
 
     @field_validator("name")
@@ -295,6 +387,29 @@ class SmartHRTData(BaseModel):
         "wind_speed_forecast_avg",
         # Historique vent
         "wind_speed_history",
+        # Cool recovery configuration
+        "cool_mode_enabled",
+        "tsp_cool",
+        "sleep_hour",
+        "coolcalc_hour",
+        # Cool coefficients
+        "rccu",
+        "rpcu",
+        "rccu_lw",
+        "rccu_hw",
+        "rpcu_lw",
+        "rpcu_hw",
+        "relaxation_factor_cool",
+        "last_rccu_error",
+        "last_rpcu_error",
+        # Cool state machine
+        "cool_current_state",
+        # Cool snapshots
+        "time_cool_calc",
+        "temp_cool_calc",
+        "text_cool_calc",
+        # Cool triggers
+        "cool_recovery_start_hour",
     }
 
     def as_dict(self) -> dict[str, Any]:

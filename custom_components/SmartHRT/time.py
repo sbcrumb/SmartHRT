@@ -43,6 +43,10 @@ async def async_setup_entry(
         SmartHRTTargetHourTime(coordinator, entry),
         SmartHRTRecoveryCalcHourTime(coordinator, entry),
         SmartHRTRecoveryStartTime(coordinator, entry),
+        # Cool recovery
+        SmartHRTSleepHourTime(coordinator, entry),
+        SmartHRTCoolCalcHourTime(coordinator, entry),
+        SmartHRTCoolRecoveryStartTime(coordinator, entry),
     ]
     async_add_entities(entities, True)
 
@@ -148,4 +152,83 @@ class SmartHRTRecoveryStartTime(SmartHRTBaseTime):
         """Cette entité est en lecture seule (calculée automatiquement)"""
         _LOGGER.warning(
             "SmartHRT Recovery Start time is read-only and calculated automatically"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cool Recovery Time Entities
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class SmartHRTSleepHourTime(SmartHRTBaseTime):
+    """Entité time pour l'heure de coucher (sleep_hour)."""
+
+    def __init__(
+        self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
+    ) -> None:
+        super().__init__(coordinator, config_entry)
+        self._attr_name = "Heure de coucher"
+        self._attr_unique_id = f"{self._device_id}_sleep_hour"
+
+    @property
+    def native_value(self) -> dt_time:
+        return self.coordinator.data.sleep_hour
+
+    @property
+    def icon(self) -> str | None:
+        return "mdi:weather-night"
+
+    async def async_set_value(self, value: dt_time) -> None:
+        _LOGGER.info("Sleep hour changed to: %s", value)
+        self.coordinator.set_sleep_hour(value)
+
+
+class SmartHRTCoolCalcHourTime(SmartHRTBaseTime):
+    """Entité time pour l'heure de calcul de récupération fraîcheur (coolcalc_hour)."""
+
+    def __init__(
+        self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
+    ) -> None:
+        super().__init__(coordinator, config_entry)
+        self._attr_name = "Heure calcul fraîcheur"
+        self._attr_unique_id = f"{self._device_id}_coolcalc_hour"
+
+    @property
+    def native_value(self) -> dt_time:
+        return self.coordinator.data.coolcalc_hour
+
+    @property
+    def icon(self) -> str | None:
+        return "mdi:snowflake-alert"
+
+    async def async_set_value(self, value: dt_time) -> None:
+        _LOGGER.info("Cool calc hour changed to: %s", value)
+        self.coordinator.set_coolcalc_hour(value)
+
+
+class SmartHRTCoolRecoveryStartTime(SmartHRTBaseTime):
+    """Entité time pour l'heure de démarrage de la clim (lecture seule)."""
+
+    def __init__(
+        self, coordinator: SmartHRTCoordinator, config_entry: ConfigEntry
+    ) -> None:
+        super().__init__(coordinator, config_entry)
+        self._attr_name = "Heure démarrage clim"
+        self._attr_unique_id = f"{self._device_id}_cool_recovery_start_time"
+
+    @property
+    def native_value(self) -> dt_time | None:
+        if self.coordinator.data.cool_recovery_start_hour:
+            local_time = dt_util.as_local(self.coordinator.data.cool_recovery_start_hour)
+            return local_time.time()
+        return None
+
+    @property
+    def icon(self) -> str | None:
+        return "mdi:air-conditioner"
+
+    async def async_set_value(self, value: dt_time) -> None:
+        """Lecture seule - calculée automatiquement."""
+        _LOGGER.warning(
+            "SmartHRT Cool Recovery Start time is read-only and calculated automatically"
         )

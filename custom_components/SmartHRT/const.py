@@ -20,6 +20,11 @@ class TimerKey(StrEnum):
     TARGET_HOUR = "target_hour"
     RECOVERY_START = "recovery_start"
     RECOVERY_UPDATE = "recovery_update"
+    # Cool recovery timers
+    COOLCALC_HOUR = "coolcalc_hour"
+    SLEEP_HOUR = "sleep_hour"
+    COOL_RECOVERY_START = "cool_recovery_start"
+    COOL_RECOVERY_UPDATE = "cool_recovery_update"
 
 
 DOMAIN = "smarthrt"
@@ -39,6 +44,12 @@ CONF_SENSOR_INTERIOR_TEMP = "sensor_interior_temperature"
 CONF_WEATHER_ENTITY = "weather_entity"
 CONF_TSP = "tsp"
 
+# Cool recovery configuration keys
+CONF_COOL_MODE = "cool_mode_enabled"
+CONF_TSP_COOL = "tsp_cool"
+CONF_SLEEP_HOUR = "sleep_hour"
+CONF_COOLCALC_HOUR = "coolcalc_hour"
+
 # Default values
 DEFAULT_TSP = 19.0
 DEFAULT_TSP_MIN = 13.0
@@ -53,6 +64,20 @@ DEFAULT_RCTH_MAX = 19999.0
 DEFAULT_RPTH_MIN = 0.0
 DEFAULT_RPTH_MAX = 19999.0
 DEFAULT_RELAXATION_FACTOR = 2.0
+
+# Cool recovery defaults
+DEFAULT_TSP_COOL = 20.0
+DEFAULT_TSP_COOL_MIN = 14.0
+DEFAULT_TSP_COOL_MAX = 26.0
+DEFAULT_RCCU = 50.0
+DEFAULT_RPCU = 50.0
+DEFAULT_RCCU_MIN = 0.0
+DEFAULT_RCCU_MAX = 19999.0
+DEFAULT_RPCU_MIN = 0.0
+DEFAULT_RPCU_MAX = 19999.0
+DEFAULT_SLEEP_HOUR = "22:00:00"
+DEFAULT_COOLCALC_HOUR = "18:00:00"
+TEMP_INCREASE_THRESHOLD = 0.2  # °C — seuil de hausse pour confirmer l'arrêt du refroidissement
 
 # ADR-007: Compensation météo - seuils de vent pour interpolation
 # WIND_LOW: vent faible (utilise rcth_lw), WIND_HIGH: vent fort (utilise rcth_hw)
@@ -76,6 +101,11 @@ SERVICE_GET_STATE = "get_state"
 # Services utilitaires
 SERVICE_RESET_LEARNING = "reset_learning"
 SERVICE_TRIGGER_CALCULATION = "trigger_calculation"
+
+# Cool recovery services
+SERVICE_START_COOL_RECOVERY = "start_cool_recovery"
+SERVICE_END_COOL_RECOVERY = "end_cool_recovery"
+SERVICE_RESET_COOL_LEARNING = "reset_cool_learning"
 
 # Weather forecast settings
 FORECAST_HOURS = 3

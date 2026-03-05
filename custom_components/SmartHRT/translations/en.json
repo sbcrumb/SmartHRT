@@ -54,7 +54,11 @@
           "recoverycalc_hour": "Heating stop hour",
           "sensor_interior_temperature": "Interior temperature sensor",
           "weather_entity": "Weather source (outdoor temperature)",
-          "tsp": "Set Point"
+          "tsp": "Set Point",
+          "cool_mode_enabled": "Enable cool recovery",
+          "tsp_cool": "Cool set point",
+          "sleep_hour": "Sleep hour",
+          "coolcalc_hour": "Cool calc hour"
         },
         "data_description": {
           "name": "Integration name",
@@ -62,7 +66,27 @@
           "recoverycalc_hour": "Time when heating stops (e.g. 23:00)",
           "sensor_interior_temperature": "Room temperature sensor (e.g. sensor.room_temperature)",
           "weather_entity": "Weather integration providing outdoor temperature and wind speed (e.g. weather.home, weather.meteo_france).",
-          "tsp": "Target temperature (13-26°C)"
+          "tsp": "Target temperature (13-26°C)",
+          "cool_mode_enabled": "Enable automatic pre-cooling to reach target sleep temperature",
+          "tsp_cool": "Target sleep temperature (14-26°C)",
+          "sleep_hour": "Bedtime — the AC stops learning at this hour (e.g. 22:00)",
+          "coolcalc_hour": "Time when cool recovery is calculated each evening (e.g. 18:00)"
+        }
+      },
+      "cool": {
+        "title": "Cool Recovery Configuration",
+        "description": "Configure cool recovery parameters for pre-cooling your home before bedtime",
+        "data": {
+          "cool_mode_enabled": "Enable cool recovery",
+          "tsp_cool": "Cool set point",
+          "sleep_hour": "Sleep hour",
+          "coolcalc_hour": "Cool calc hour"
+        },
+        "data_description": {
+          "cool_mode_enabled": "Enable automatic pre-cooling to reach target sleep temperature",
+          "tsp_cool": "Target sleep temperature (14-26°C)",
+          "sleep_hour": "Bedtime — the AC stops learning at this hour (e.g. 22:00)",
+          "coolcalc_hour": "Time when cool recovery is calculated each evening (e.g. 18:00)"
         }
       }
     }
@@ -147,6 +171,36 @@
           "description": "The config entry ID (optional, uses first available if not specified)."
         }
       }
+    },
+    "start_cool_recovery": {
+      "name": "Start Cool Recovery",
+      "description": "Manually starts the cool recovery (turns on AC and begins measurement phase).",
+      "fields": {
+        "entry_id": {
+          "name": "Entry ID",
+          "description": "The config entry ID (optional, uses first available if not specified)."
+        }
+      }
+    },
+    "end_cool_recovery": {
+      "name": "End Cool Recovery",
+      "description": "Manually ends the cool recovery, records temperatures and updates RPcu coefficient.",
+      "fields": {
+        "entry_id": {
+          "name": "Entry ID",
+          "description": "The config entry ID (optional, uses first available if not specified)."
+        }
+      }
+    },
+    "reset_cool_learning": {
+      "name": "Reset Cool Learning",
+      "description": "Resets all learned cool coefficients (RCcu, RPcu) to their default values.",
+      "fields": {
+        "entry_id": {
+          "name": "Entry ID",
+          "description": "The config entry ID (optional, uses first available if not specified)."
+        }
+      }
     }
   },
   "entity": {
@@ -219,6 +273,78 @@
       },
       "recoverycalc_hour_timestamp": {
         "name": "Heating Stop Hour"
+      },
+      "tsp_cool_sensor": {
+        "name": "Cool Set Point"
+      },
+      "rccu_sensor": {
+        "name": "RCcu"
+      },
+      "rpcu_sensor": {
+        "name": "RPcu"
+      },
+      "cool_recovery_calc_mode": {
+        "name": "Cool Recovery Calc Mode"
+      },
+      "cool_rp_calc_mode": {
+        "name": "Cool RP Calc Mode"
+      },
+      "cool_state": {
+        "name": "Cool Machine State",
+        "state": {
+          "cool_idle": "Idle",
+          "cool_monitoring": "Monitoring",
+          "cool_recovery": "Cooling",
+          "unknown": "Unknown"
+        }
+      },
+      "cool_recovery_start_timestamp": {
+        "name": "Cool Recovery Start Time"
+      }
+    },
+    "number": {
+      "tsp_cool": {
+        "name": "Cool Set Point"
+      },
+      "rccu": {
+        "name": "RCcu (Passive Warming Rate)"
+      },
+      "rpcu": {
+        "name": "RPcu (AC Cooling Power)"
+      },
+      "rccu_lw": {
+        "name": "RCcu Low Wind"
+      },
+      "rccu_hw": {
+        "name": "RCcu High Wind"
+      },
+      "rpcu_lw": {
+        "name": "RPcu Low Wind"
+      },
+      "rpcu_hw": {
+        "name": "RPcu High Wind"
+      },
+      "relaxation_factor_cool": {
+        "name": "Cool Relaxation Factor"
+      }
+    },
+    "switch": {
+      "cool_mode_enabled": {
+        "name": "Cool Recovery"
+      },
+      "smartcooling_mode": {
+        "name": "Smart Cooling"
+      }
+    },
+    "time": {
+      "sleep_hour": {
+        "name": "Sleep Hour"
+      },
+      "coolcalc_hour": {
+        "name": "Cool Calc Hour"
+      },
+      "cool_recovery_start": {
+        "name": "Cool Recovery Start"
       }
     }
   }

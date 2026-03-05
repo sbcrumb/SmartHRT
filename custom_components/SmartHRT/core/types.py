@@ -143,6 +143,10 @@ class PhysicsGuardResult(StrEnum):
     INVALID_COEFFICIENT = "invalid_coefficient"  # RCth ou RPth invalide
     EXTERIOR_WARMER = "exterior_warmer"  # Extérieur plus chaud que la cible
     MISSING_DATA = "missing_data"  # Données manquantes
+    # Cool recovery guards
+    ALREADY_AT_TARGET_COOL = "already_at_target_cool"  # Déjà assez frais
+    NO_PASSIVE_WARMING = "no_passive_warming"  # Extérieur plus frais, pas besoin de clim
+    TARGET_COOL_UNREACHABLE = "target_cool_unreachable"  # Clim insuffisante
 
 
 @dataclass(frozen=True)
@@ -187,6 +191,13 @@ class Action(StrEnum):
     SAVE_DATA = "save_data"
     SCHEDULE_RECOVERY_UPDATE = "schedule_recovery_update"
     CANCEL_RECOVERY_TIMER = "cancel_recovery_timer"
+    # Cool recovery actions
+    SNAPSHOT_COOL_START = "snapshot_cool_start"
+    SNAPSHOT_COOL_END = "snapshot_cool_end"
+    CALCULATE_RCCU = "calculate_rccu"
+    CALCULATE_RPCU = "calculate_rpcu"
+    SCHEDULE_COOL_RECOVERY_UPDATE = "schedule_cool_recovery_update"
+    CANCEL_COOL_RECOVERY_TIMER = "cancel_cool_recovery_timer"
 
 
 @dataclass
@@ -197,3 +208,45 @@ class StateTransitionResult:
     old_state: object
     new_state: object
     actions: list[Action] = field(default_factory=list)
+
+
+class CoolSmartHRTState(StrEnum):
+    """États pour le cycle de récupération de fraîcheur (cool recovery).
+
+    Cycle:
+    COOL_IDLE → COOL_MONITORING → COOL_RECOVERY → COOL_IDLE
+    """
+
+    COOL_IDLE = "cool_idle"          # En attente (pas de cycle actif)
+    COOL_MONITORING = "cool_monitoring"  # Calcul de l'heure de démarrage clim
+    COOL_RECOVERY = "cool_recovery"  # Clim en marche pour atteindre la cible
+
+
+@dataclass
+class CoolThermalCoefficients:
+    """Coefficients thermiques appris pour le refroidissement.
+
+    Représente les coefficients RCcu et RPcu avec leurs variantes
+    pour différentes conditions de vent (interpolation ADR-007 adaptée).
+    """
+
+    # Coefficients principaux
+    rccu: float = 50.0  # Constante de temps de réchauffement passif
+    rpcu: float = 50.0  # Constante de puissance de refroidissement (clim)
+
+    # Coefficients interpolés selon le vent (ADR-007)
+    rccu_lw: float = 50.0  # RCcu par vent faible
+    rccu_hw: float = 50.0  # RCcu par vent fort
+    rpcu_lw: float = 50.0  # RPcu par vent faible
+    rpcu_hw: float = 50.0  # RPcu par vent fort
+
+    # Derniers coefficients calculés (avant relaxation)
+    rccu_calculated: float = 0.0
+    rpcu_calculated: float = 0.0
+
+    # Facteur de relaxation pour l'apprentissage (ADR-006)
+    relaxation_factor: float = 2.0
+
+    # Erreurs du dernier cycle (pour diagnostic)
+    last_rccu_error: float = 0.0
+    last_rpcu_error: float = 0.0

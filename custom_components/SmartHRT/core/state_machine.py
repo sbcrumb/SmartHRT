@@ -13,7 +13,7 @@ import logging
 from enum import StrEnum
 from typing import Callable, Protocol
 
-from .types import Action, StateTransitionResult
+from .types import Action, StateTransitionResult, CoolSmartHRTState
 
 
 class LoggerProtocol(Protocol):
@@ -110,6 +110,37 @@ TRANSITION_ACTIONS: dict[tuple[SmartHRTState, SmartHRTState], list[Action]] = {
 }
 
 StateTransitionCallback = Callable[[SmartHRTState, SmartHRTState], None]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cool recovery state machine configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+COOL_VALID_TRANSITIONS: dict[CoolSmartHRTState, set[CoolSmartHRTState]] = {
+    CoolSmartHRTState.COOL_IDLE: {CoolSmartHRTState.COOL_MONITORING},
+    CoolSmartHRTState.COOL_MONITORING: {
+        CoolSmartHRTState.COOL_RECOVERY,
+        CoolSmartHRTState.COOL_IDLE,
+    },
+    CoolSmartHRTState.COOL_RECOVERY: {CoolSmartHRTState.COOL_IDLE},
+}
+
+COOL_TRANSITION_ACTIONS: dict[tuple[CoolSmartHRTState, CoolSmartHRTState], list[Action]] = {
+    (CoolSmartHRTState.COOL_IDLE, CoolSmartHRTState.COOL_MONITORING): [
+        Action.SCHEDULE_COOL_RECOVERY_UPDATE,
+    ],
+    (CoolSmartHRTState.COOL_MONITORING, CoolSmartHRTState.COOL_RECOVERY): [
+        Action.CANCEL_COOL_RECOVERY_TIMER,
+        Action.SNAPSHOT_COOL_START,
+        Action.CALCULATE_RCCU,
+        Action.SAVE_DATA,
+    ],
+    (CoolSmartHRTState.COOL_MONITORING, CoolSmartHRTState.COOL_IDLE): [],
+    (CoolSmartHRTState.COOL_RECOVERY, CoolSmartHRTState.COOL_IDLE): [
+        Action.SNAPSHOT_COOL_END,
+        Action.CALCULATE_RPCU,
+        Action.SAVE_DATA,
+    ],
+}
 
 _LOGGER = logging.getLogger(__name__)
 

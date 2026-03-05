@@ -33,6 +33,15 @@ from .const import (
     DEFAULT_TSP_MIN,
     DEFAULT_TSP_MAX,
     DEFAULT_TSP_STEP,
+    CONF_COOL_MODE,
+    CONF_TSP_COOL,
+    CONF_SLEEP_HOUR,
+    CONF_COOLCALC_HOUR,
+    DEFAULT_TSP_COOL,
+    DEFAULT_TSP_COOL_MIN,
+    DEFAULT_TSP_COOL_MAX,
+    DEFAULT_SLEEP_HOUR,
+    DEFAULT_COOLCALC_HOUR,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -273,7 +282,16 @@ STATIC_KEYS = {
     CONF_WEATHER_ENTITY,
 }
 # Clés stockées dans 'options' (réglages dynamiques - modifiables sans rechargement)
-DYNAMIC_KEYS = {CONF_TARGET_HOUR, CONF_RECOVERYCALC_HOUR, CONF_TSP}
+DYNAMIC_KEYS = {
+    CONF_TARGET_HOUR,
+    CONF_RECOVERYCALC_HOUR,
+    CONF_TSP,
+    # Cool recovery
+    CONF_COOL_MODE,
+    CONF_TSP_COOL,
+    CONF_SLEEP_HOUR,
+    CONF_COOLCALC_HOUR,
+}
 
 
 class SmartHRTOptionsFlow(OptionsFlow):
@@ -324,6 +342,25 @@ class SmartHRTOptionsFlow(OptionsFlow):
                         mode=selector.NumberSelectorMode.BOX,
                     ),
                 ),
+                # ── Cool Recovery ─────────────────────────────────────────────
+                vol.Optional(CONF_COOL_MODE, default=False): selector.BooleanSelector(),
+                vol.Optional(
+                    CONF_TSP_COOL, default=DEFAULT_TSP_COOL
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=DEFAULT_TSP_COOL_MIN,
+                        max=DEFAULT_TSP_COOL_MAX,
+                        step=0.5,
+                        unit_of_measurement="°C",
+                        mode=selector.NumberSelectorMode.BOX,
+                    ),
+                ),
+                vol.Optional(
+                    CONF_SLEEP_HOUR, default=DEFAULT_SLEEP_HOUR
+                ): selector.TimeSelector(),
+                vol.Optional(
+                    CONF_COOLCALC_HOUR, default=DEFAULT_COOLCALC_HOUR
+                ): selector.TimeSelector(),
             }
         )
 

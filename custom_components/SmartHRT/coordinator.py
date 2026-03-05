@@ -75,6 +75,16 @@ from .const import (
     TEMP_DECREASE_THRESHOLD,
     DEFAULT_RECOVERYCALC_HOUR,
     TimerKey,
+    # Cool recovery
+    CONF_COOL_MODE,
+    CONF_TSP_COOL,
+    CONF_SLEEP_HOUR,
+    CONF_COOLCALC_HOUR,
+    DEFAULT_TSP_COOL,
+    DEFAULT_RCCU,
+    DEFAULT_RPCU,
+    DEFAULT_SLEEP_HOUR,
+    DEFAULT_COOLCALC_HOUR,
 )
 
 # ADR-051: Import du gestionnaire centralisé de timers
@@ -96,6 +106,11 @@ from .core import (
     VALID_TRANSITIONS,
     TRANSITION_ACTIONS,
     # ADR-040: get_state_flags n'est plus utilisé, flags sont des propriétés calculées
+    # Cool recovery
+    CoolSmartHRTState,
+    CoolThermalCoefficients,
+    COOL_VALID_TRANSITIONS,
+    COOL_TRANSITION_ACTIONS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -149,6 +164,17 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
             ),
         )
 
+        # Apply cool recovery config from entry if configured
+        options: dict = {**entry.data, **(entry.options or {})}
+        if options.get(CONF_COOL_MODE):
+            self.data.cool_mode_enabled = True
+            if CONF_TSP_COOL in options:
+                self.data.tsp_cool = float(options[CONF_TSP_COOL])
+            if CONF_SLEEP_HOUR in options:
+                self.data.sleep_hour = self._parse_time(options[CONF_SLEEP_HOUR])
+            if CONF_COOLCALC_HOUR in options:
+                self.data.coolcalc_hour = self._parse_time(options[CONF_COOLCALC_HOUR])
+
         # ADR-033/034/046: Machine à états avec actions déclaratives
         # ADR-049: Démarrage en INITIALIZING, transition vers l'état restauré dans _restore_learned_data
         log_prefix = f"[{self.data.name}#{entry.entry_id[:8]}]"
@@ -166,6 +192,24 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
         self._state_machine.on_enter(SmartHRTState.RECOVERY, self._on_state_entered)
         self._state_machine.on_enter(
             SmartHRTState.HEATING_PROCESS, self._on_state_entered
+        )
+
+        # Cool recovery state machine (reuses SmartHRTStateMachine generically)
+        self._cool_state_machine = SmartHRTStateMachine(
+            CoolSmartHRTState.COOL_IDLE,
+            valid_transitions=COOL_VALID_TRANSITIONS,
+            transition_actions=COOL_TRANSITION_ACTIONS,
+            logger=_LOGGER,  # type: ignore[arg-type]
+            log_prefix=log_prefix,
+        )
+        self._cool_state_machine.on_enter(
+            CoolSmartHRTState.COOL_MONITORING, self._on_cool_state_entered
+        )
+        self._cool_state_machine.on_enter(
+            CoolSmartHRTState.COOL_RECOVERY, self._on_cool_state_entered
+        )
+        self._cool_state_machine.on_enter(
+            CoolSmartHRTState.COOL_IDLE, self._on_cool_state_entered
         )
 
         self._interior_temp_sensor_id = entry.data.get(CONF_SENSOR_INTERIOR_TEMP)
@@ -195,6 +239,12 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
     ) -> None:
         """Synchronise l'état exposé avec la machine à états."""
         self.data.current_state = new_state
+
+    def _on_cool_state_entered(
+        self, _old_state: CoolSmartHRTState, new_state: CoolSmartHRTState
+    ) -> None:
+        """Synchronise l'état cool exposé avec la machine à états."""
+        self.data.cool_current_state = new_state
 
     def transition_to(self, new_state: SmartHRTState) -> bool:
         """Effectue une transition d'état si elle est valide (ADR-028).
@@ -384,6 +434,8 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
         await self._update_initial_states()
         self._setup_listeners()
         self._setup_time_triggers()
+        if self.data.cool_mode_enabled:
+            self._setup_cool_time_triggers()
 
         # Restaurer les triggers selon l'état (ne dépend pas de la météo)
         await self._restore_state_after_restart()
@@ -490,6 +542,11 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
                 "%s Aucune donnée apprise trouvée, utilisation des défauts",
                 self._log_prefix(),
             )
+
+        # Sync cool state machine to restored state
+        cool_target = self.data.cool_current_state
+        if self._cool_state_machine.state != cool_target:
+            self._cool_state_machine._force_state_unsafe(cool_target)
 
         # ADR-049: Transition depuis INITIALIZING vers l'état cible
         # Utilise transition_to pour déclencher les callbacks on_enter
@@ -1368,6 +1425,10 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
         if self.data.rp_calc_mode and self.data.interior_temp >= self.data.tsp:
             self.on_recovery_end()
 
+        # Cool recovery: vérifier si la consigne fraîcheur est atteinte
+        if self.data.cool_rp_calc_mode and self.data.interior_temp <= self.data.tsp_cool:
+            self.on_cool_recovery_end()
+
     def _on_temperature_decrease_detected(self) -> None:
         """Appelé quand la température commence réellement à baisser
         Équivalent du trigger 'temperatureDecrease' dans l'automation detect_temperature_lag
@@ -1548,6 +1609,7 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
             )
             self.force_state(SmartHRTState.HEATING_ON)
             await self._save_learned_data()
+            await self._restore_cool_state_after_restart()
             self.async_set_updated_data(self.data)
             return
 
@@ -1558,6 +1620,10 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
             persisted_state.value,
         )
         self._restore_triggers_for_state(persisted_state, now)
+
+        # Restaurer l'état cool recovery
+        await self._restore_cool_state_after_restart()
+
         self.async_set_updated_data(self.data)
 
     def on_heating_stop(self) -> None:
@@ -2020,3 +2086,832 @@ class SmartHRTCoordinator(DataUpdateCoordinator[SmartHRTData]):
 
         # Return 0 if time has passed
         return max(0, round(hours, 2))
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Cool Recovery — État machine helpers
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _apply_cool_state_transition_with_actions(
+        self,
+        new_state: CoolSmartHRTState,
+        updates: dict[str, object] | None = None,
+        omit_actions: set[Action] | None = None,
+    ) -> list[Action] | None:
+        current = self._cool_state_machine.state
+        valid_targets = COOL_VALID_TRANSITIONS.get(current, set())
+        if not self._cool_state_machine.can_transition(current, new_state):
+            _LOGGER.warning(
+                "%s Cool transition invalide %s → %s (autorisées: %s)",
+                self._log_prefix(),
+                current.value,
+                new_state.value,
+                (
+                    ", ".join(s.value for s in valid_targets)
+                    if valid_targets
+                    else "aucune"
+                ),
+            )
+            return None
+
+        self.data.update(cool_current_state=new_state, **(updates or {}))
+        self._cool_state_machine._force_state_unsafe(new_state, run_callbacks=False)
+
+        actions = self._cool_state_machine.actions_for_transition(current, new_state)
+        if omit_actions:
+            actions = [action for action in actions if action not in omit_actions]
+        return actions
+
+    def _execute_cool_actions(self, actions: list[Action]) -> None:
+        """Exécute les actions cool recovery émises par la machine à états."""
+        if not actions:
+            return
+
+        action_handlers = {
+            Action.SNAPSHOT_COOL_START: self._snapshot_cool_start,
+            Action.SNAPSHOT_COOL_END: self._snapshot_cool_end,
+            Action.CALCULATE_RCCU: self._calculate_rccu_at_cool_start,
+            Action.CALCULATE_RPCU: self._calculate_rpcu_at_cool_end,
+            Action.SAVE_DATA: self._save_learned_data,
+            Action.SCHEDULE_COOL_RECOVERY_UPDATE: self._schedule_cool_recovery_update_from_data,
+            Action.CANCEL_COOL_RECOVERY_TIMER: self._cancel_cool_recovery_start_timer,
+        }
+
+        _LOGGER.debug(
+            "%s Exécution actions cool: %s",
+            self._log_prefix(),
+            [a.value for a in actions],
+        )
+
+        for action in actions:
+            handler = action_handlers.get(action)
+            if not handler:
+                _LOGGER.warning(
+                    "%s Action cool non gérée: %s", self._log_prefix(), action.value
+                )
+                continue
+            try:
+                result = handler()
+                if asyncio.iscoroutine(result):
+                    self.hass.async_create_task(result)
+            except Exception as e:
+                _LOGGER.error(
+                    "%s Erreur lors de l'action cool %s: %s",
+                    self._log_prefix(),
+                    action.value,
+                    e,
+                )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Cool Recovery — Déclencheurs horaires
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _setup_cool_time_triggers(self) -> None:
+        """Configure les déclencheurs horaires pour la récupération de fraîcheur."""
+        if not self.data.cool_mode_enabled:
+            return
+
+        self._cancel_cool_time_triggers()
+
+        now = dt_util.now()
+
+        if not self.data.coolcalc_hour or not self.data.sleep_hour:
+            _LOGGER.error(
+                "%s coolcalc_hour ou sleep_hour non défini, triggers cool non configurés",
+                self._log_prefix(),
+            )
+            return
+
+        # Trigger pour coolcalc_hour (calcul du soir)
+        coolcalc_dt = now.replace(
+            hour=self.data.coolcalc_hour.hour,
+            minute=self.data.coolcalc_hour.minute,
+            second=0,
+            microsecond=0,
+        )
+        if coolcalc_dt <= now:
+            coolcalc_dt += timedelta(days=1)
+
+        self._timer_manager.schedule(
+            TimerKey.COOLCALC_HOUR,
+            self._on_coolcalc_hour,
+            coolcalc_dt,
+        )
+
+        # Trigger pour sleep_hour (heure de coucher)
+        sleep_dt = now.replace(
+            hour=self.data.sleep_hour.hour,
+            minute=self.data.sleep_hour.minute,
+            second=0,
+            microsecond=0,
+        )
+        if sleep_dt <= now:
+            sleep_dt += timedelta(days=1)
+
+        self._timer_manager.schedule(
+            TimerKey.SLEEP_HOUR,
+            self._on_sleep_hour,
+            sleep_dt,
+        )
+
+        # Restaurer le trigger de démarrage clim si présent
+        if self.data.cool_recovery_start_hour:
+            cool_start = self.data.cool_recovery_start_hour
+            if cool_start.tzinfo is None:
+                cool_start = dt_util.as_local(cool_start)
+            if cool_start > now:
+                self._timer_manager.schedule(
+                    TimerKey.COOL_RECOVERY_START,
+                    self._on_cool_recovery_start,
+                    cool_start,
+                )
+
+        # Restaurer le trigger de mise à jour si présent
+        if self.data.cool_recovery_update_hour:
+            cool_update = self.data.cool_recovery_update_hour
+            if cool_update.tzinfo is None:
+                cool_update = dt_util.as_local(cool_update)
+            if cool_update > now:
+                self._timer_manager.schedule(
+                    TimerKey.COOL_RECOVERY_UPDATE,
+                    self._on_cool_recovery_update,
+                    cool_update,
+                )
+
+    def _cancel_cool_time_triggers(self) -> None:
+        """Annule les déclencheurs horaires de récupération fraîcheur."""
+        self._timer_manager.cancel(TimerKey.COOLCALC_HOUR)
+        self._timer_manager.cancel(TimerKey.SLEEP_HOUR)
+        self._timer_manager.cancel(TimerKey.COOL_RECOVERY_START)
+        self._timer_manager.cancel(TimerKey.COOL_RECOVERY_UPDATE)
+
+    @callback
+    def _on_coolcalc_hour(self, _now) -> None:
+        """Appelé à l'heure de calcul de la récupération fraîcheur."""
+        _LOGGER.info("%s Heure de calcul fraîcheur atteinte", self._log_prefix())
+
+        if not self.data.cool_mode_enabled:
+            self._reschedule_coolcalc_hour()
+            return
+
+        self.hass.async_create_task(self._async_on_coolcalc_hour())
+
+    async def _async_on_coolcalc_hour(self) -> None:
+        """Initialise le cycle de récupération de fraîcheur.
+
+        Transition: COOL_IDLE → COOL_MONITORING
+        """
+        # Initialisation des constantes si première exécution
+        if self.data.rccu_lw <= 0:
+            self.data.rccu_lw = DEFAULT_RCCU
+            self.data.rccu_hw = DEFAULT_RCCU
+            self.data.rpcu_lw = DEFAULT_RPCU
+            self.data.rpcu_hw = DEFAULT_RPCU
+            _LOGGER.info(
+                "%s Initialisation des constantes cool à %s", self._log_prefix(), DEFAULT_RCCU
+            )
+
+        # Snapshot coolcalc
+        self.data.time_cool_calc = dt_util.now()
+        self.data.temp_cool_calc = self.data.interior_temp or 22.0
+        self.data.text_cool_calc = self.data.exterior_temp or 25.0
+
+        # Transition vers COOL_MONITORING
+        if not self._cool_state_machine.can_transition(
+            self._cool_state_machine.state, CoolSmartHRTState.COOL_MONITORING
+        ):
+            # Force si nécessaire
+            self._cool_state_machine._force_state_unsafe(CoolSmartHRTState.COOL_MONITORING)
+            self.data.cool_current_state = CoolSmartHRTState.COOL_MONITORING
+        else:
+            self._cool_state_machine._force_state_unsafe(CoolSmartHRTState.COOL_MONITORING)
+            self.data.cool_current_state = CoolSmartHRTState.COOL_MONITORING
+
+        _LOGGER.debug("%s Transition vers état COOL_MONITORING", self._log_prefix())
+
+        # Calculer l'heure de démarrage de la clim
+        prev_cool_start = self.data.cool_recovery_start_hour
+        self.calculate_cool_recovery_time()
+
+        # Programmer le trigger de démarrage clim
+        now = dt_util.now()
+        if (
+            self.data.cool_recovery_start_hour
+            and prev_cool_start != self.data.cool_recovery_start_hour
+            and self.data.cool_recovery_start_hour > now
+        ):
+            self._schedule_cool_recovery_start(self.data.cool_recovery_start_hour)
+
+        # Programmer la mise à jour périodique
+        cool_update_time = self.calculate_cool_recovery_update_time()
+        if cool_update_time:
+            self.data.cool_recovery_update_hour = cool_update_time
+            self._schedule_cool_recovery_update(cool_update_time)
+
+        self._reschedule_coolcalc_hour()
+
+        await self._save_learned_data()
+        self.async_set_updated_data(self.data)
+
+    @callback
+    def _on_sleep_hour(self, _now) -> None:
+        """Appelé à l'heure de coucher (sleep_hour)."""
+        _LOGGER.info("%s Heure de coucher atteinte", self._log_prefix())
+
+        if not self.data.cool_mode_enabled:
+            self._reschedule_sleep_hour()
+            return
+
+        self.hass.async_create_task(self._async_on_sleep_hour())
+
+    async def _async_on_sleep_hour(self) -> None:
+        """Fin du cycle de récupération de fraîcheur à l'heure de coucher."""
+        if self.data.cool_rp_calc_mode:
+            self.on_cool_recovery_end()
+
+        self._reschedule_sleep_hour()
+        await self._save_learned_data()
+        self.async_set_updated_data(self.data)
+
+    @callback
+    def _on_cool_recovery_start(self, _now) -> None:
+        """Appelé à l'heure calculée de démarrage de la clim."""
+        _LOGGER.info("%s Heure de démarrage clim atteinte", self._log_prefix())
+
+        if not self.data.cool_mode_enabled:
+            return
+
+        if self.data.cool_current_state == CoolSmartHRTState.COOL_RECOVERY:
+            _LOGGER.debug(
+                "%s Clim déjà en cours (COOL_RECOVERY), ignoré", self._log_prefix()
+            )
+            return
+
+        self.on_cool_recovery_start()
+
+    @callback
+    def _on_cool_recovery_update(self, _now) -> None:
+        """Appelé pour mettre à jour le calcul de la récupération fraîcheur."""
+        if not self.data.cool_mode_enabled:
+            return
+
+        _LOGGER.debug("%s Mise à jour du calcul fraîcheur", self._log_prefix())
+        self.hass.async_create_task(self._async_on_cool_recovery_update())
+
+    async def _async_on_cool_recovery_update(self) -> None:
+        """Recalcule l'heure de démarrage de la clim."""
+        prev_cool_start = self.data.cool_recovery_start_hour
+
+        if self.data.cool_recovery_calc_mode:
+            self.calculate_cool_recovery_time()
+
+            now = dt_util.now()
+            if (
+                self.data.cool_recovery_start_hour
+                and prev_cool_start != self.data.cool_recovery_start_hour
+                and self.data.cool_recovery_start_hour > now
+            ):
+                self._schedule_cool_recovery_start(self.data.cool_recovery_start_hour)
+
+        # Toujours reprogrammer la prochaine mise à jour
+        cool_update_time = self.calculate_cool_recovery_update_time()
+        if cool_update_time:
+            self.data.cool_recovery_update_hour = cool_update_time
+            self._schedule_cool_recovery_update(cool_update_time)
+            _LOGGER.debug(
+                "%s Prochaine mise à jour cool programmée: %s",
+                self._log_prefix(),
+                cool_update_time,
+            )
+
+        self.async_set_updated_data(self.data)
+
+    def _reschedule_coolcalc_hour(self) -> None:
+        """Reprogramme le déclencheur coolcalc_hour pour le lendemain."""
+        if not self.data.coolcalc_hour:
+            return
+        now = dt_util.now()
+        next_trigger = now.replace(
+            hour=self.data.coolcalc_hour.hour,
+            minute=self.data.coolcalc_hour.minute,
+            second=0,
+            microsecond=0,
+        ) + timedelta(days=1)
+
+        self._timer_manager.schedule(
+            TimerKey.COOLCALC_HOUR,
+            self._on_coolcalc_hour,
+            next_trigger,
+        )
+
+    def _reschedule_sleep_hour(self) -> None:
+        """Reprogramme le déclencheur sleep_hour pour le lendemain."""
+        if not self.data.sleep_hour:
+            return
+        now = dt_util.now()
+        next_trigger = now.replace(
+            hour=self.data.sleep_hour.hour,
+            minute=self.data.sleep_hour.minute,
+            second=0,
+            microsecond=0,
+        ) + timedelta(days=1)
+
+        self._timer_manager.schedule(
+            TimerKey.SLEEP_HOUR,
+            self._on_sleep_hour,
+            next_trigger,
+        )
+
+    def _schedule_cool_recovery_start(self, trigger_time: datetime) -> None:
+        """Programme le déclencheur de démarrage clim."""
+        was_active = self._timer_manager.is_active(TimerKey.COOL_RECOVERY_START)
+
+        self._timer_manager.schedule(
+            TimerKey.COOL_RECOVERY_START,
+            self._on_cool_recovery_start,
+            trigger_time,
+        )
+
+        if was_active:
+            _LOGGER.debug(
+                "%s Trigger cool reprogrammé: nouveau à %s",
+                self._log_prefix(),
+                trigger_time,
+            )
+        else:
+            _LOGGER.debug(
+                "%s Nouveau trigger cool_recovery_start: %s",
+                self._log_prefix(),
+                trigger_time,
+            )
+
+    @callback
+    def _schedule_cool_recovery_update(self, trigger_time: datetime) -> None:
+        """Programme le déclencheur de mise à jour du calcul fraîcheur."""
+        self._timer_manager.schedule(
+            TimerKey.COOL_RECOVERY_UPDATE,
+            self._on_cool_recovery_update,
+            trigger_time,
+        )
+
+    def _cancel_cool_recovery_start_timer(self) -> None:
+        """Annule le trigger de cool recovery start."""
+        self._timer_manager.cancel(TimerKey.COOL_RECOVERY_START)
+
+    def _schedule_cool_recovery_update_from_data(self) -> None:
+        """Programme la mise à jour fraîcheur si une heure est connue."""
+        if self.data.cool_recovery_update_hour:
+            self._schedule_cool_recovery_update(self.data.cool_recovery_update_hour)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Cool Recovery — Snapshots et calculs
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _snapshot_cool_start(self) -> None:
+        """Snapshot des données au démarrage de la clim."""
+        self.data.time_cool_start = dt_util.now()
+        self.data.temp_cool_start = self.data.interior_temp or 22.0
+        self.data.text_cool_start = self.data.exterior_temp or 25.0
+
+    def _snapshot_cool_end(self) -> None:
+        """Snapshot des données à la fin de la récupération fraîcheur."""
+        self.data.time_cool_end = dt_util.now()
+        self.data.temp_cool_end = self.data.interior_temp or 22.0
+        self.data.text_cool_end = self.data.exterior_temp or 25.0
+
+    def _calculate_rccu_at_cool_start(self) -> None:
+        """Handler action: calcule RCcu au démarrage de la clim."""
+        self.calculate_rccu_at_cool_recovery_start()
+
+    def _calculate_rpcu_at_cool_end(self) -> None:
+        """Handler action: calcule RPcu à la fin de la récupération fraîcheur."""
+        self.calculate_rpcu_at_cool_recovery_end()
+
+    def _build_cool_thermal_coefficients(self) -> CoolThermalCoefficients:
+        """Construit un CoolThermalCoefficients depuis les données actuelles."""
+        return CoolThermalCoefficients(
+            rccu=self.data.rccu,
+            rpcu=self.data.rpcu,
+            rccu_lw=self.data.rccu_lw,
+            rccu_hw=self.data.rccu_hw,
+            rpcu_lw=self.data.rpcu_lw,
+            rpcu_hw=self.data.rpcu_hw,
+            rccu_calculated=self.data.rccu_calculated,
+            rpcu_calculated=self.data.rpcu_calculated,
+            relaxation_factor=self.data.relaxation_factor_cool,
+            last_rccu_error=self.data.last_rccu_error,
+            last_rpcu_error=self.data.last_rpcu_error,
+        )
+
+    def _build_cool_thermal_state(self) -> ThermalState:
+        """Construit un ThermalState pour le calcul de récupération de fraîcheur.
+
+        Réutilise ThermalState avec tsp=tsp_cool et target_hour=sleep_hour.
+        """
+        return ThermalState(
+            interior_temp=self.data.interior_temp,
+            exterior_temp=self.data.exterior_temp,
+            windchill=self.data.windchill,
+            wind_speed_ms=self.data.wind_speed,
+            wind_speed_avg_ms=self.data.wind_speed_avg,
+            temperature_forecast_avg=self.data.temperature_forecast_avg,
+            wind_speed_forecast_avg_kmh=self.data.wind_speed_forecast_avg,
+            tsp=self.data.tsp_cool,
+            target_hour=self.data.sleep_hour or dt_time(22, 0),
+            now=dt_util.now(),
+            temp_recovery_calc=self.data.temp_cool_calc,
+            text_recovery_calc=self.data.text_cool_calc,
+            temp_recovery_start=self.data.temp_cool_start,
+            text_recovery_start=self.data.text_cool_start,
+            temp_recovery_end=self.data.temp_cool_end,
+            text_recovery_end=self.data.text_cool_end,
+            time_recovery_calc=self.data.time_cool_calc,
+            time_recovery_start=self.data.time_cool_start,
+            time_recovery_end=self.data.time_cool_end,
+        )
+
+    def _get_interpolated_rccu(self, wind_kmh: float) -> float:
+        """Retourne RCcu interpolé selon le vent."""
+        coeffs = self._build_cool_thermal_coefficients()
+        return self._thermal_solver.get_interpolated_rccu(coeffs, wind_kmh)
+
+    def calculate_cool_recovery_time(self) -> None:
+        """Calcule l'heure de démarrage de la clim (symétrique de calculate_recovery_time)."""
+        now = dt_util.now()
+        state = self._build_cool_thermal_state()
+        coeffs = self._build_cool_thermal_coefficients()
+
+        result = self._thermal_solver.calculate_cool_recovery_duration(state, coeffs, now)
+
+        self.data.cool_recovery_start_hour = result.recovery_start_hour
+
+        _LOGGER.debug(
+            "%s Cool recovery time: %s (%.2fh avant sleep_hour)",
+            self._log_prefix(),
+            self.data.cool_recovery_start_hour,
+            result.duration_hours,
+        )
+
+    def calculate_cool_recovery_update_time(self) -> datetime | None:
+        """Calcule l'heure de mise à jour du calcul de récupération fraîcheur."""
+        if self.data.cool_recovery_start_hour is None:
+            return None
+
+        now = dt_util.now()
+        return self._thermal_solver.calculate_recovery_update_time(
+            self.data.cool_recovery_start_hour,
+            now,
+        )
+
+    def calculate_rccu_at_cool_recovery_start(self) -> None:
+        """Calcule RCcu au démarrage de la clim."""
+        if (
+            self.data.time_cool_start is None
+            or self.data.time_cool_calc is None
+        ):
+            return
+
+        result = self._thermal_solver.calculate_rccu_at_recovery(
+            temp_cool_calc=self.data.temp_cool_calc,
+            temp_cool_start=self.data.temp_cool_start,
+            text_cool_calc=self.data.text_cool_calc,
+            text_cool_start=self.data.text_cool_start,
+            time_cool_calc=self.data.time_cool_calc,
+            time_cool_start=self.data.time_cool_start,
+        )
+
+        if result is not None:
+            self.data.rccu_calculated = result
+
+        if self.data.smartcooling_mode:
+            self._update_cool_coefficients("rccu")
+
+    def calculate_rpcu_at_cool_recovery_end(self) -> None:
+        """Calcule RPcu à la fin de la récupération fraîcheur."""
+        if self.data.time_cool_start is None or self.data.time_cool_end is None:
+            return
+
+        wind_kmh = self.data.wind_speed_avg * 3.6
+        rccu_interpol = self._get_interpolated_rccu(wind_kmh)
+
+        result = self._thermal_solver.calculate_rpcu_at_recovery(
+            temp_cool_start=self.data.temp_cool_start,
+            temp_cool_end=self.data.temp_cool_end,
+            text_cool_start=self.data.text_cool_start,
+            text_cool_end=self.data.text_cool_end,
+            time_cool_start=self.data.time_cool_start,
+            time_cool_end=self.data.time_cool_end,
+            rccu_interpolated=rccu_interpol,
+        )
+
+        if result is not None:
+            self.data.rpcu_calculated = result
+
+        if self.data.smartcooling_mode:
+            self._update_cool_coefficients("rpcu")
+
+    def _update_cool_coefficients(self, coef_type: str) -> None:
+        """Met à jour les coefficients cool avec relaxation (même logique que heat)."""
+        wind_kmh = self.data.wind_speed_avg * 3.6
+
+        if coef_type == "rccu":
+            result = self._thermal_solver.update_coefficients(
+                coef_type="rccu",
+                current_lw=self.data.rccu_lw,
+                current_hw=self.data.rccu_hw,
+                current_main=self.data.rccu,
+                calculated_value=self.data.rccu_calculated,
+                wind_kmh=wind_kmh,
+                relaxation_factor=self.data.relaxation_factor_cool,
+            )
+            self.data.rccu_lw = result.coef_lw
+            self.data.rccu_hw = result.coef_hw
+            self.data.rccu = result.coef_main
+            self.data.last_rccu_error = result.error
+        else:
+            result = self._thermal_solver.update_coefficients(
+                coef_type="rpcu",
+                current_lw=self.data.rpcu_lw,
+                current_hw=self.data.rpcu_hw,
+                current_main=self.data.rpcu,
+                calculated_value=self.data.rpcu_calculated,
+                wind_kmh=wind_kmh,
+                relaxation_factor=self.data.relaxation_factor_cool,
+            )
+            self.data.rpcu_lw = result.coef_lw
+            self.data.rpcu_hw = result.coef_hw
+            self.data.rpcu = result.coef_main
+            self.data.last_rpcu_error = result.error
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Cool Recovery — Cycle principal
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def on_cool_recovery_start(self) -> None:
+        """Appelé au démarrage de la clim.
+
+        Transition: COOL_MONITORING → COOL_RECOVERY
+        """
+        now = dt_util.now()
+        updates = {
+            "time_cool_start": now,
+            "temp_cool_start": self.data.interior_temp or 22.0,
+            "text_cool_start": self.data.exterior_temp or 25.0,
+        }
+        actions = self._apply_cool_state_transition_with_actions(
+            CoolSmartHRTState.COOL_RECOVERY,
+            updates=updates,
+            omit_actions={Action.SNAPSHOT_COOL_START},
+        )
+        if actions is None:
+            self.data.update(**updates)
+            self._cool_state_machine._force_state_unsafe(CoolSmartHRTState.COOL_RECOVERY)
+            self.data.cool_current_state = CoolSmartHRTState.COOL_RECOVERY
+            actions = [
+                Action.CANCEL_COOL_RECOVERY_TIMER,
+                Action.CALCULATE_RCCU,
+                Action.SAVE_DATA,
+            ]
+
+        _LOGGER.debug("%s Transition vers état COOL_RECOVERY", self._log_prefix())
+        self._execute_cool_actions(actions)
+
+        _LOGGER.info(
+            "%s Début récupération fraîcheur - Tint=%.1f°C, RCcu calculé=%.2f",
+            self._log_prefix(),
+            self.data.temp_cool_start,
+            self.data.rccu_calculated,
+        )
+
+        self.async_set_updated_data(self.data)
+
+    def on_cool_recovery_end(self) -> None:
+        """Appelé à la fin du cycle de fraîcheur (sleep_hour ou cible atteinte).
+
+        Transition: COOL_RECOVERY → COOL_IDLE
+        """
+        if not self.data.cool_rp_calc_mode:
+            return
+
+        now = dt_util.now()
+        updates = {
+            "time_cool_end": now,
+            "temp_cool_end": self.data.interior_temp or 22.0,
+            "text_cool_end": self.data.exterior_temp or 25.0,
+        }
+        actions = self._apply_cool_state_transition_with_actions(
+            CoolSmartHRTState.COOL_IDLE,
+            updates=updates,
+            omit_actions={Action.SNAPSHOT_COOL_END},
+        )
+        if actions is None:
+            self.data.update(**updates)
+            self._cool_state_machine._force_state_unsafe(CoolSmartHRTState.COOL_IDLE)
+            self.data.cool_current_state = CoolSmartHRTState.COOL_IDLE
+            actions = [
+                Action.CALCULATE_RPCU,
+                Action.SAVE_DATA,
+            ]
+
+        _LOGGER.debug(
+            "%s Transition vers état COOL_IDLE - Cycle terminé", self._log_prefix()
+        )
+        self._execute_cool_actions(actions)
+
+        _LOGGER.info(
+            "%s Fin récupération fraîcheur - Tint=%.1f°C, RPcu calculé=%.2f",
+            self._log_prefix(),
+            self.data.temp_cool_end,
+            self.data.rpcu_calculated,
+        )
+
+        self.async_set_updated_data(self.data)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Cool Recovery — Restauration après redémarrage
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def _restore_cool_state_after_restart(self) -> None:
+        """Restaure l'état cool recovery après redémarrage."""
+        if not self.data.cool_mode_enabled:
+            return
+
+        cool_state = self.data.cool_current_state
+        now = dt_util.now()
+
+        _LOGGER.info(
+            "%s Cool restauration - État: %s",
+            self._log_prefix(),
+            cool_state.value,
+        )
+
+        if cool_state == CoolSmartHRTState.COOL_MONITORING:
+            if self.data.cool_recovery_start_hour:
+                if self.data.cool_recovery_start_hour > now:
+                    self._schedule_cool_recovery_start(self.data.cool_recovery_start_hour)
+                else:
+                    _LOGGER.info(
+                        "%s Heure démarrage clim dépassée, démarrage immédiat",
+                        self._log_prefix(),
+                    )
+                    self.on_cool_recovery_start()
+
+        elif cool_state == CoolSmartHRTState.COOL_RECOVERY:
+            if self.data.sleep_hour:
+                sleep_dt = now.replace(
+                    hour=self.data.sleep_hour.hour,
+                    minute=self.data.sleep_hour.minute,
+                    second=0,
+                    microsecond=0,
+                )
+                if now >= sleep_dt:
+                    self.on_cool_recovery_end()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Cool Recovery — Méthodes Façade pour les services
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def async_manual_start_cool_recovery(self) -> dict[str, Any]:
+        """Démarrage manuel de la récupération fraîcheur (clim on)."""
+        self.on_cool_recovery_start()
+        await self._save_learned_data()
+
+        _LOGGER.info("%s Récupération fraîcheur démarrée manuellement", self._log_prefix())
+
+        return {
+            "success": True,
+            "cool_state": str(self.data.cool_current_state),
+            "time_cool_start": (
+                self.data.time_cool_start.isoformat()
+                if self.data.time_cool_start
+                else None
+            ),
+            "rccu_calculated": self.data.rccu_calculated,
+            "message": "Récupération fraîcheur démarrée",
+        }
+
+    async def async_manual_end_cool_recovery(self) -> dict[str, Any]:
+        """Fin manuelle de la récupération fraîcheur."""
+        self.on_cool_recovery_end()
+        await self._save_learned_data()
+
+        _LOGGER.info("%s Récupération fraîcheur terminée manuellement", self._log_prefix())
+
+        return {
+            "success": True,
+            "cool_state": str(self.data.cool_current_state),
+            "time_cool_end": (
+                self.data.time_cool_end.isoformat()
+                if self.data.time_cool_end
+                else None
+            ),
+            "rpcu_calculated": self.data.rpcu_calculated,
+            "message": "Récupération fraîcheur terminée",
+        }
+
+    async def reset_cool_learning(self) -> None:
+        """Remet les coefficients cool appris aux valeurs par défaut."""
+        _LOGGER.info("%s Remise à zéro des coefficients cool", self._log_prefix())
+        self.data.rccu = DEFAULT_RCCU
+        self.data.rpcu = DEFAULT_RPCU
+        self.data.rccu_lw = DEFAULT_RCCU
+        self.data.rccu_hw = DEFAULT_RCCU
+        self.data.rpcu_lw = DEFAULT_RPCU
+        self.data.rpcu_hw = DEFAULT_RPCU
+        self.data.rccu_calculated = 0.0
+        self.data.rpcu_calculated = 0.0
+        self.data.last_rccu_error = 0.0
+        self.data.last_rpcu_error = 0.0
+
+        await self._save_learned_data()
+
+        if self.data.cool_recovery_calc_mode:
+            self.calculate_cool_recovery_time()
+        self.async_set_updated_data(self.data)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Cool Recovery — Setters
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def set_tsp_cool(self, value: float) -> None:
+        """Définit la température de consigne fraîcheur."""
+        self.data.tsp_cool = value
+        if self.data.cool_recovery_calc_mode:
+            self.calculate_cool_recovery_time()
+            if self.data.cool_recovery_start_hour:
+                now = dt_util.now()
+                if self.data.cool_recovery_start_hour > now:
+                    self._schedule_cool_recovery_start(self.data.cool_recovery_start_hour)
+        self.async_set_updated_data(self.data)
+
+    def set_sleep_hour(self, value: dt_time) -> None:
+        """Définit l'heure de coucher."""
+        self.data.sleep_hour = value
+        self._setup_cool_time_triggers()
+        if self.data.cool_recovery_calc_mode:
+            self.calculate_cool_recovery_time()
+        self.async_set_updated_data(self.data)
+        self.hass.async_create_task(self._save_learned_data())
+
+    def set_coolcalc_hour(self, value: dt_time) -> None:
+        """Définit l'heure de calcul de récupération fraîcheur."""
+        self.data.coolcalc_hour = value
+        self._setup_cool_time_triggers()
+        self.async_set_updated_data(self.data)
+        self.hass.async_create_task(self._save_learned_data())
+
+    def set_cool_mode_enabled(self, value: bool) -> None:
+        """Active/désactive le mode récupération fraîcheur."""
+        self.data.cool_mode_enabled = value
+        if value:
+            self._setup_cool_time_triggers()
+        else:
+            self._cancel_cool_time_triggers()
+        self.async_set_updated_data(self.data)
+
+    def set_rccu(self, value: float) -> None:
+        """Définit le coefficient thermique RCcu."""
+        self.data.rccu = value
+        if self.data.cool_recovery_calc_mode:
+            self.calculate_cool_recovery_time()
+        self.async_set_updated_data(self.data)
+
+    def set_rpcu(self, value: float) -> None:
+        """Définit le coefficient thermique RPcu."""
+        self.data.rpcu = value
+        if self.data.cool_recovery_calc_mode:
+            self.calculate_cool_recovery_time()
+        self.async_set_updated_data(self.data)
+
+    def set_rccu_lw(self, value: float) -> None:
+        """Définit RCcu pour vent faible."""
+        self.data.rccu_lw = value
+        if self.data.cool_recovery_calc_mode:
+            self.calculate_cool_recovery_time()
+        self.async_set_updated_data(self.data)
+
+    def set_rccu_hw(self, value: float) -> None:
+        """Définit RCcu pour vent fort."""
+        self.data.rccu_hw = value
+        if self.data.cool_recovery_calc_mode:
+            self.calculate_cool_recovery_time()
+        self.async_set_updated_data(self.data)
+
+    def set_rpcu_lw(self, value: float) -> None:
+        """Définit RPcu pour vent faible."""
+        self.data.rpcu_lw = value
+        self.async_set_updated_data(self.data)
+
+    def set_rpcu_hw(self, value: float) -> None:
+        """Définit RPcu pour vent fort."""
+        self.data.rpcu_hw = value
+        self.async_set_updated_data(self.data)
+
+    def set_relaxation_factor_cool(self, value: float) -> None:
+        """Définit le facteur de relaxation pour les coefficients cool."""
+        self.data.relaxation_factor_cool = value
+        self.async_set_updated_data(self.data)
+
+    def set_smartcooling_mode(self, value: bool) -> None:
+        """Active/désactive le mode adaptatif cool."""
+        self.data.smartcooling_mode = value
+        self.async_set_updated_data(self.data)
